@@ -3564,15 +3564,33 @@ void CConnman::ThreadOpenMasternodeConnections(CDeterministicMNManager& dmnman, 
 
         // Hard cap on masternode outbound connections to prevent FD exhaustion
         // during quorum formation. Count current MN outbound connections.
+        //
+        // v1.3.2: (a) raised 64 -> 80 (the old cap silently bound at ~129 MNs with
+        // 24 active quorums, since deterministic outbound pairs ~= (N-1)/2 -- the
+        // network would have walked into it while growing and it would have looked
+        // exactly like the launch DKG failures); (b) probe connections are EXCLUDED
+        // from the count so warm-up probes can never starve the intra-quorum links
+        // the DKG actually needs; (c) hitting the cap now logs a rate-limited
+        // WARNING instead of a debug-only line. Proper fix (scale with MN count /
+        // nMaxConnections) is v1.4 work; this makes the cliff visible, not silent.
         {
-            static constexpr size_t MAX_MN_OUTBOUND = 64;
+            static constexpr size_t MAX_MN_OUTBOUND = 80;
             size_t nMNOutbound = 0;
             ForEachNode([&](const CNode* pnode) {
-                if (pnode->m_masternode_connection && !pnode->IsInboundConn() && !pnode->fDisconnect) {
+                if (pnode->m_masternode_connection && !pnode->IsInboundConn() && !pnode->fDisconnect &&
+                    !pnode->m_masternode_probe_connection) {
                     ++nMNOutbound;
                 }
             });
-            if (nMNOutbound >= MAX_MN_OUTBOUND) {
+            if (nMNOutbound >= MAX_MN_OUTBOUND && isProbe != MasternodeProbeConn::IsConnection) {
+                static std::atomic<int64_t> s_lastCapWarn{0};
+                const int64_t now = GetTime();
+                if (now - s_lastCapWarn.load() >= 600) {
+                    s_lastCapWarn = now;
+                    LogPrintf("WARNING: CConnman::%s -- at masternode outbound cap (%zu); quorum connections may be "
+                              "starved. Consider raising -maxconnections. (skipping %s)\n",
+                              _func_, MAX_MN_OUTBOUND, connectToDmn->proTxHash.ToString());
+                }
                 LogPrint(BCLog::NET_NETCONN, "CConnman::%s -- at MN outbound cap (%zu), skipping connection to %s\n",
                          _func_, MAX_MN_OUTBOUND, connectToDmn->proTxHash.ToString());
                 continue;

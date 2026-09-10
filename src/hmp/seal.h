@@ -73,6 +73,11 @@ public:
     CBLSSignature aggregatedSig;                // BLS aggregate of all shares
     std::vector<CBLSPublicKey> signers;          // who contributed
     std::vector<uint8_t> signerAlgos;            // per-signer algo domain
+    // Per-signer VRF proofs (v6/HMP_REARM, B-02), index-parallel to `signers`.
+    // Deliberately NOT part of the legacy SERIALIZE_METHODS below so the existing
+    // `sealasm` wire format stays byte-identical for v1.3.1 peers; these are carried
+    // in memory, committed on-chain via CCbTx v6, and relayed via SEALASM2.
+    std::vector<CBLSSignature> vrfProofs;
 
     SERIALIZE_METHODS(CAssembledSeal, obj)
     {

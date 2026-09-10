@@ -95,3 +95,23 @@ uint64_t EvaluateNegativeProof(const std::vector<CBLSPublicKey>& signerPubKeys,
     uint64_t penalty = 5000 + (above * 5000) / range;
     return std::min(penalty, uint64_t{10000});
 }
+
+uint64_t EvaluateMannequinPenalty(const std::vector<CBLSPublicKey>& signerPubKeys,
+                                  const CHMPPrivilegeTracker* privilege)
+{
+    if (!privilege || signerPubKeys.empty()) return 10000;
+
+    std::set<CBLSPublicKey> allPrivileged;
+    for (int a = 0; a < NUM_ALGOS; a++) {
+        auto privSet = privilege->GetPrivilegedSet(a);
+        allPrivileged.insert(privSet.begin(), privSet.end());
+    }
+    size_t unknownSigners = 0;
+    for (const auto& signer : signerPubKeys) {
+        if (!allPrivileged.count(signer)) unknownSigners++;
+    }
+    // Integer bps to avoid float non-determinism (same arithmetic as EvaluateNegativeProof).
+    const uint64_t unknownBps = (static_cast<uint64_t>(unknownSigners) * 10000) /
+                                static_cast<uint64_t>(signerPubKeys.size());
+    return unknownBps > 5000 ? 1000 : 10000;
+}

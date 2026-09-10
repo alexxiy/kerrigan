@@ -212,7 +212,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     const bool fDIP0003Active_context{DeploymentActiveAfter(pindexPrev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_DIP0003)};
     const bool fDIP0008Active_context{DeploymentActiveAfter(pindexPrev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_DIP0008)};
     const bool fV20Active_context{DeploymentActiveAfter(pindexPrev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_V20)};
-    const bool fHMPActive_context{DeploymentActiveAfter(pindexPrev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_HMP)};
+    // HMP coinbase versions require V20 (see CheckCbTx); same conjunction so the
+    // template can never be built with a version the validator rejects.
+    const bool fHMPActive_context{fV20Active_context && DeploymentActiveAfter(pindexPrev, chainparams.GetConsensus(), Consensus::DEPLOYMENT_HMP)};
+    // v1.3.2: unified HMP re-arm fork active for the block being built.
+    const bool fRearm_context{chainparams.GetConsensus().IsHMPRearmActive(pindexPrev->nHeight + 1)};
 
     // Limit size to between 1K and MaxBlockSize()-1K for sanity:
     nBlockMaxSize = std::max<unsigned int>(1000, std::min<unsigned int>(MaxBlockSize(fDIP0001Active_context) - 1000, nBlockMaxSize));
@@ -342,22 +346,80 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
                     // without in-memory seal cache after restart.
                     cbTx.vSealSigners = seal->signers;
                     cbTx.vSealSignerAlgos = seal->signerAlgos;
-                    LogPrintf("CreateNewBlock() h[%d] HMP seal for block %s with %zu signers\n",
-                              nHeight, seal->blockHash.ToString().substr(0, 16), seal->signers.size());
+                    // B-02 (v6/HMP_REARM): embed the per-signer VRF proofs, index-
+                    // parallel to vSealSigners, so validators can recompute the
+                    // committee. Only serialized/checked when nVersion >= HMP_REARM
+                    // (the version bump lands with the B-03/identity signing so a v6
+                    // block is never emitted with unpopulated commitment/identity sigs).
+                    cbTx.vSealSignerVRFProofs = seal->vrfProofs;
+                    // Post-rearm a v6 block MUST carry one VRF proof per signer
+                    // (bad-seal-vrf-parity otherwise). A seal learned via the legacy
+                    // SEALASM path has no proofs -> omit the seal entirely: a neutral
+                    // block beats an invalid one.
+                    if (fRearm_context && cbTx.vSealSignerVRFProofs.size() != cbTx.vSealSigners.size()) {
+                        LogPrintf("CreateNewBlock() h[%d] HMP seal for %s lacks VRF proofs (%zu/%zu) post-rearm; omitting seal\n",
+                                  nHeight, seal->blockHash.ToString().substr(0, 16),
+                                  cbTx.vSealSignerVRFProofs.size(), cbTx.vSealSigners.size());
+                        cbTx.sealForAncestor = CBLSSignature();
+                        cbTx.sealBlockHash.SetNull();
+                        cbTx.vSealSigners.clear();
+                        cbTx.vSealSignerAlgos.clear();
+                        cbTx.vSealSignerVRFProofs.clear();
+                    } else {
+                        LogPrintf("CreateNewBlock() h[%d] HMP seal for block %s with %zu signers\n",
+                                  nHeight, seal->blockHash.ToString().substr(0, 16), seal->signers.size());
+                    }
                 }
             }
-            // Embed pending pubkey commitments (CCbTx v5)
+            // Embed pending pubkey commitments (CCbTx v5 / v6)
             if (chainparams.GetConsensus().nHMPCommitmentOffset > 0 &&
                 g_hmp_commit_pool && g_hmp_commitments) {
-                auto commits = g_hmp_commit_pool->GetForTemplate(
-                    Consensus::Params::MAX_COMMITMENTS_PER_BLOCK, *g_hmp_commitments);
-                if (!commits.empty()) {
-                    cbTx.vCommitments = std::move(commits);
-                    cbTx.nVersion = CCbTx::Version::HMP_COMMITMENT;
-                    LogPrintf("CreateNewBlock() h[%d] HMP embedding %zu pubkey commitments\n",
-                              nHeight, cbTx.vCommitments.size());
+                if (fRearm_context) {
+                    // v6 (B-03): commitments travel WITH their self-signatures, so pull
+                    // the full signed CPubKeyCommit entries and keep the two vectors
+                    // index-parallel. GetPendingCommits already skips unsigned
+                    // reorg-restored entries; drop anything the registry already has.
+                    auto pending = g_hmp_commit_pool->GetPendingCommits(
+                        Consensus::Params::MAX_COMMITMENTS_PER_BLOCK * 2);
+                    for (const auto& c : pending) {
+                        if (cbTx.vCommitments.size() >= static_cast<size_t>(Consensus::Params::MAX_COMMITMENTS_PER_BLOCK)) break;
+                        if (g_hmp_commitments->HasCommitment(c.pubKey)) continue;
+                        if (!c.Verify()) continue; // never embed a sig we can't verify ourselves
+                        cbTx.vCommitments.push_back(c.pubKey);
+                        cbTx.vCommitmentSigs.push_back(c.signature);
+                    }
+                    if (!cbTx.vCommitments.empty()) {
+                        LogPrintf("CreateNewBlock() h[%d] HMP embedding %zu signed pubkey commitments (v6)\n",
+                                  nHeight, cbTx.vCommitments.size());
+                    }
+                } else {
+                    auto commits = g_hmp_commit_pool->GetForTemplate(
+                        Consensus::Params::MAX_COMMITMENTS_PER_BLOCK, *g_hmp_commitments);
+                    if (!commits.empty()) {
+                        cbTx.vCommitments = std::move(commits);
+                        cbTx.nVersion = CCbTx::Version::HMP_COMMITMENT;
+                        LogPrintf("CreateNewBlock() h[%d] HMP embedding %zu pubkey commitments\n",
+                                  nHeight, cbTx.vCommitments.size());
+                    }
                 }
             }
+        }
+
+        // v1.3.2 HMP_REARM (v6) emission. Deliberately OUTSIDE the SPORK_25 gate:
+        // CheckCbTx makes v6 MANDATORY at/after nHMPRearmHeight (two-sided gate),
+        // whether or not seals/commitments are being produced. Same for the miner
+        // identity signature -- a v6 block without it is invalid. The message is
+        // CCbTx::MinerIdentitySignatureHash (height, parent, payout script); the
+        // coinbase payout script is scriptPubKeyIn (FillBlockPayments only appends
+        // outputs / adjusts values, never rewrites vout[0].scriptPubKey).
+        if (fRearm_context) {
+            cbTx.nVersion = CCbTx::Version::HMP_REARM;
+            if (!g_hmp_identity || !g_hmp_identity->IsValid()) {
+                throw std::runtime_error(strprintf("%s: HMP identity required to mine at/after nHMPRearmHeight (h=%d)", __func__, nHeight));
+            }
+            cbTx.minerIdentity = g_hmp_identity->GetPublicKey();
+            cbTx.minerIdentitySig = g_hmp_identity->Sign(
+                CCbTx::MinerIdentitySignatureHash(nHeight, pindexPrev->GetBlockHash(), scriptPubKeyIn));
         }
 
         SetTxPayload(coinbaseTx, cbTx);

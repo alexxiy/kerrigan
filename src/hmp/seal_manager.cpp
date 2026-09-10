@@ -109,12 +109,16 @@ bool CSealManager::TryAssemble(CSealSession& session, std::optional<std::pair<CA
     std::vector<CBLSSignature> sigs;
     std::vector<CBLSPublicKey> pubkeys;
     std::vector<uint8_t> algos;
+    std::vector<CBLSSignature> vrfProofs;
 
     for (const auto& [pk, share] : session.shares) {
         if (share.signature.IsValid() && pk.IsValid()) {
             sigs.push_back(share.signature);
             pubkeys.push_back(pk);
             algos.push_back(share.algoId);
+            // Carry the share's VRF proof (already VerifyVRF-checked in AddSealShare)
+            // index-parallel to the signer, for CCbTx v6 (B-02).
+            vrfProofs.push_back(share.vrfProof);
         }
     }
 
@@ -132,6 +136,7 @@ bool CSealManager::TryAssemble(CSealSession& session, std::optional<std::pair<CA
     seal.aggregatedSig = aggSig;
     seal.signers = pubkeys;
     seal.signerAlgos = algos;
+    seal.vrfProofs = vrfProofs;
 
     if (!seal.Verify()) {
         LogPrintf("HMP: assembled seal failed verification for block %s\n",

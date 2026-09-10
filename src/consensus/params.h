@@ -288,6 +288,29 @@ struct Params {
         return nDaaLwmaHeight > 0 && height >= nDaaLwmaHeight;
     }
 
+    /** v1.3.2 unified hard-fork activation height. ONE flag day carries every
+     *  v1.3.2 consensus change so operators upgrade exactly once:
+     *    - HMP re-arm economics (per-algo penalty arming + monotone,
+     *      committee-normalised seal weighting) -- SPORK_25 stays the runtime
+     *      kill switch ON TOP of this height;
+     *    - CCbTx v6 (HMP_REARM): on-chain VRF committee proofs (B-02),
+     *      commitment self-signatures (B-03), signed miner identity;
+     *    - Elder-set Sybil fix (B-01);
+     *    - DKG penalty recalibration (66 -> 33) and dkgPhaseBlocks 2 -> 4;
+     *    - LWMA stranded-algo bounded gap reset.
+     *  The HMP re-arm and the LWMA retarget (nDaaLwmaHeight) are independent
+     *  regime changes; nHMPRearmHeight may sit on either side of nDaaLwmaHeight
+     *  and is intentionally set below it here so the two forks do not share a
+     *  flag day. 0 = never (all the above stay dormant).
+     */
+    int nHMPRearmHeight{0};
+
+    /** Whether the v1.3.2 HMP re-arm consensus rules are active at a height. */
+    bool IsHMPRearmActive(int height) const
+    {
+        return nHMPRearmHeight > 0 && height >= nHMPRearmHeight;
+    }
+
     /** Hard-fork activation height for the LLMQ_60_60 small-network quorum.
      *  The Dash-inherited quorum roles (ChainLocks on LLMQ_400_60, EHF on
      *  LLMQ_400_85, InstantSend on the DIP0024-rotated LLMQ_60_75) can never

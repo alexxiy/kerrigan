@@ -3153,4 +3153,211 @@ BOOST_AUTO_TEST_CASE(DeterministicSeal_GateBoundary)
     BOOST_CHECK(!params.IsDeterministicSealActive(56999));
 }
 
+
+// ======================================================================
+// v1.3.2 (HMP re-arm) unit tests
+// ======================================================================
+
+/* CCbTx v6 (HMP_REARM): the three parallel proof/sig vectors + the miner
+ * identity signature round-trip, and v5 bytes deserialize with them empty. */
+BOOST_AUTO_TEST_CASE(cbtx_v6_serialization_roundtrip)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    CBLSSecretKey sk, sk2, sk3;
+    sk.MakeNewKey(); sk2.MakeNewKey(); sk3.MakeNewKey();
+
+    CCbTx original;
+    original.nVersion = CCbTx::Version::HMP_REARM;
+    original.nHeight = 160001;
+    original.merkleRootMNList = uint256::ONE;
+    original.merkleRootQuorums = uint256::TWO;
+    original.bestCLHeightDiff = 3;
+    original.bestCLSignature = sk.Sign(uint256::ONE, false);
+    original.creditPoolBalance = 42;
+    original.minerIdentity = sk.GetPublicKey();
+    original.sealForAncestor = sk.Sign(uint256::TWO, false);
+    original.sealBlockHash.SetHex("00000000000000000000000000000000000000000000000000000000000000ab");
+    original.vSealSigners = {sk2.GetPublicKey(), sk3.GetPublicKey()};
+    original.vSealSignerAlgos = {ALGO_X11, ALGO_X11};
+    original.vCommitments = {sk2.GetPublicKey()};
+    // v6
+    original.vSealSignerVRFProofs = {sk2.Sign(uint256::ONE, false), sk3.Sign(uint256::ONE, false)};
+    original.vCommitmentSigs = {sk2.Sign(CPubKeyCommit::SignatureHash(sk2.GetPublicKey()), false)};
+    original.minerIdentitySig = sk.Sign(uint256::TWO, false);
+
+    CDataStream ss(SER_DISK, CLIENT_VERSION);
+    ss << original;
+    CCbTx d;
+    ss >> d;
+
+    BOOST_CHECK(d.nVersion == CCbTx::Version::HMP_REARM);
+    BOOST_CHECK_EQUAL(d.vSealSignerVRFProofs.size(), 2u);
+    BOOST_CHECK(d.vSealSignerVRFProofs[0] == original.vSealSignerVRFProofs[0]);
+    BOOST_CHECK(d.vSealSignerVRFProofs[1] == original.vSealSignerVRFProofs[1]);
+    BOOST_CHECK_EQUAL(d.vCommitmentSigs.size(), 1u);
+    BOOST_CHECK(d.vCommitmentSigs[0] == original.vCommitmentSigs[0]);
+    BOOST_CHECK(d.minerIdentitySig == original.minerIdentitySig);
+    // the B-03 self-sig we embedded actually verifies against the committed key
+    BOOST_CHECK(d.vCommitmentSigs[0].VerifyInsecure(d.vCommitments[0],
+                CPubKeyCommit::SignatureHash(d.vCommitments[0]), false));
+
+    // v5 bytes -> v6 fields absent/empty
+    CCbTx v5 = original;
+    v5.nVersion = CCbTx::Version::HMP_COMMITMENT;
+    CDataStream ss5(SER_DISK, CLIENT_VERSION);
+    ss5 << v5;
+    CCbTx d5;
+    ss5 >> d5;
+    BOOST_CHECK(d5.nVersion == CCbTx::Version::HMP_COMMITMENT);
+    BOOST_CHECK(d5.vSealSignerVRFProofs.empty());
+    BOOST_CHECK(d5.vCommitmentSigs.empty());
+    BOOST_CHECK(!d5.minerIdentitySig.IsValid());
+}
+
+/* Miner identity signature: bound to height + parent + payout script (Q3), so a
+ * copied signature only validates in a block paying the honest miner. */
+BOOST_AUTO_TEST_CASE(cbtx_miner_identity_sig_binding)
+{
+    bls::bls_legacy_scheme.store(false);
+    CBLSSecretKey sk; sk.MakeNewKey();
+    const CBLSPublicKey pk = sk.GetPublicKey();
+
+    CScript payoutA = CScript() << OP_DUP << OP_HASH160 << std::vector<unsigned char>(20, 0x11) << OP_EQUALVERIFY << OP_CHECKSIG;
+    CScript payoutB = CScript() << OP_DUP << OP_HASH160 << std::vector<unsigned char>(20, 0x22) << OP_EQUALVERIFY << OP_CHECKSIG;
+
+    const uint256 hA = CCbTx::MinerIdentitySignatureHash(160001, uint256::ONE, payoutA);
+    BOOST_CHECK(hA != CCbTx::MinerIdentitySignatureHash(160002, uint256::ONE, payoutA)); // height-bound
+    BOOST_CHECK(hA != CCbTx::MinerIdentitySignatureHash(160001, uint256::TWO, payoutA)); // parent-bound
+    BOOST_CHECK(hA != CCbTx::MinerIdentitySignatureHash(160001, uint256::ONE, payoutB)); // payout-bound
+    BOOST_CHECK(hA == CCbTx::MinerIdentitySignatureHash(160001, uint256::ONE, payoutA)); // deterministic
+
+    const CBLSSignature sig = sk.Sign(hA, false);
+    BOOST_CHECK(sig.VerifyInsecure(pk, hA, false));
+    // Same (identity, sig) pasted into a block that pays someone else: invalid.
+    BOOST_CHECK(!sig.VerifyInsecure(pk, CCbTx::MinerIdentitySignatureHash(160001, uint256::ONE, payoutB), false));
+}
+
+namespace {
+// Feed a synthetic 4-algo round-robin chain into a tracker. X11 blocks are
+// mined by rotating keys (so several identities reach blocks_solved >= 3), and
+// the block two after each X11 block embeds a seal covering it signed by
+// `sealSigners` when (x11Index % sealEvery == 0).
+void FeedRearmChain(CHMPPrivilegeTracker& t, const std::vector<CBLSPublicKey>& keys,
+                    const std::vector<CBLSPublicKey>& sealSigners, int fromHeight, int toHeight, int sealEvery)
+{
+    for (int h = fromHeight; h < toHeight; ++h) {
+        const int algo = h % NUM_ALGOS;
+        const CBLSPublicKey& miner = keys[(h / NUM_ALGOS) % keys.size()];
+        std::vector<CBLSPublicKey> signers;
+        std::vector<uint8_t> algos;
+        int sealedAlgo = -1;
+        const int sealedH = h - 2; // seal for h-2 lives in h
+        if (sealedH >= 0 && sealedH % NUM_ALGOS == ALGO_X11 && sealEvery > 0 &&
+            ((sealedH / NUM_ALGOS) % sealEvery) == 0) {
+            signers = sealSigners;
+            algos.assign(signers.size(), static_cast<uint8_t>(ALGO_X11));
+            sealedAlgo = ALGO_X11;
+        }
+        t.BlockConnected(h, algo, miner, signers, algos, sealedAlgo);
+    }
+}
+Consensus::Params RearmTrackerParams()
+{
+    Consensus::Params p;
+    p.nHMPPrivilegeWindow = 100;
+    p.nHMPWarmupBlocks = 5;
+    p.nHMPMinBlocksSolved = 3;
+    p.nHMPDominanceCatchFloor = 6;
+    p.nHMPDominanceCatchMaxLookback = 1000;
+    return p;
+}
+} // namespace
+
+/* §1 arming is STATELESS: a pure function of the recent window. Same block
+ * sequence -> same decision on a fresh tracker (the RebuildHMPState cold
+ * replay), and a disconnect+truncate matches a tracker that never saw the
+ * extra blocks. Every X11 block sealed by 4 identities -> ARMED; 40% -> not. */
+BOOST_AUTO_TEST_CASE(privilege_tracker_penalty_arming_stateless)
+{
+    bls::bls_legacy_scheme.store(false);
+    std::vector<CBLSSecretKey> sks(6);
+    std::vector<CBLSPublicKey> keys;
+    for (auto& sk : sks) { sk.MakeNewKey(); keys.push_back(sk.GetPublicKey()); }
+    const std::vector<CBLSPublicKey> fourSigners(keys.begin(), keys.begin() + 4);
+
+    auto params = RearmTrackerParams();
+    CHMPPrivilegeTracker live(params);
+    FeedRearmChain(live, keys, fourSigners, 0, 480, /*sealEvery=*/1);
+    BOOST_CHECK_EQUAL(live.GetElderSet(ALGO_X11, /*includeBackfill=*/false).size(), 4u);
+    BOOST_CHECK(live.IsPenaltyArmed(ALGO_X11));
+    BOOST_CHECK(!live.IsPenaltyArmed(ALGO_KAWPOW)); // no seals ever covered kawpow
+
+    // Cold replay of the identical sequence == live.
+    CHMPPrivilegeTracker cold(params);
+    FeedRearmChain(cold, keys, fourSigners, 0, 480, 1);
+    BOOST_CHECK_EQUAL(cold.IsPenaltyArmed(ALGO_X11), live.IsPenaltyArmed(ALGO_X11));
+    BOOST_CHECK_EQUAL(cold.IsPenaltyArmed(ALGO_KAWPOW), live.IsPenaltyArmed(ALGO_KAWPOW));
+
+    // Reorg: disconnect back to 450 must equal a tracker that stopped at 450.
+    live.BlockDisconnected(450);
+    CHMPPrivilegeTracker to450(params);
+    FeedRearmChain(to450, keys, fourSigners, 0, 450, 1);
+    for (int a = 0; a < NUM_ALGOS; ++a) {
+        BOOST_CHECK_EQUAL(live.IsPenaltyArmed(a), to450.IsPenaltyArmed(a));
+    }
+
+    // 40% sealed (every 5th X11 block ... 1 of 5 = 20%; use 2 of 5 via two passes)
+    // -> below ARM (60%) and below HOLD (45%): not armed.
+    CHMPPrivilegeTracker sparse(params);
+    FeedRearmChain(sparse, keys, fourSigners, 0, 480, /*sealEvery=*/3); // ~33% sealed
+    BOOST_CHECK(!sparse.IsPenaltyArmed(ALGO_X11));
+
+    // Only 2 distinct signer identities (diversity < 4) never arms even at 100%.
+    const std::vector<CBLSPublicKey> twoSigners(keys.begin(), keys.begin() + 2);
+    CHMPPrivilegeTracker lowdiv(params);
+    FeedRearmChain(lowdiv, keys, twoSigners, 0, 480, 1);
+    BOOST_CHECK(!lowdiv.IsPenaltyArmed(ALGO_X11));
+}
+
+/* Post-rearm the only sub-floor penalty is the provable mannequin case. */
+BOOST_AUTO_TEST_CASE(negative_proof_mannequin_only)
+{
+    bls::bls_legacy_scheme.store(false);
+    auto params = RearmTrackerParams();
+    CHMPPrivilegeTracker t(params);
+    CBLSSecretKey skP, skU; skP.MakeNewKey(); skU.MakeNewKey();
+    const CBLSPublicKey priv = skP.GetPublicKey(), unknown = skU.GetPublicKey();
+    for (int h = 0; h < 20; ++h) t.BlockConnected(h, ALGO_X11, priv, {});
+    BOOST_CHECK(t.GetTier(priv, ALGO_X11) != HMPPrivilegeTier::UNKNOWN);
+
+    BOOST_CHECK_EQUAL(EvaluateMannequinPenalty({}, &t), 10000u);
+    BOOST_CHECK_EQUAL(EvaluateMannequinPenalty({priv}, &t), 10000u);
+    BOOST_CHECK_EQUAL(EvaluateMannequinPenalty({unknown}, &t), 1000u);          // 100% strangers
+    BOOST_CHECK_EQUAL(EvaluateMannequinPenalty({priv, unknown}, &t), 10000u);   // 50% is not > 50%
+    BOOST_CHECK_EQUAL(EvaluateMannequinPenalty({priv, unknown, unknown}, &t), 1000u);
+}
+
+/* B-01: post-rearm the dominance-catch backfill applies the effective Elder
+ * threshold; pre-rearm it still admits 1-block identities (legacy). */
+BOOST_AUTO_TEST_CASE(privilege_tracker_b01_backfill_threshold)
+{
+    bls::bls_legacy_scheme.store(false);
+    CBLSSecretKey skA, skB; skA.MakeNewKey(); skB.MakeNewKey();
+    const CBLSPublicKey A = skA.GetPublicKey(), B = skB.GetPublicKey();
+
+    auto run = [&](int rearmHeight) {
+        auto params = RearmTrackerParams();
+        params.nHMPRearmHeight = rearmHeight;
+        CHMPPrivilegeTracker t(params);
+        // B mines exactly once (h=0) and signs one seal; A mines 4 and signs.
+        t.BlockConnected(0, ALGO_X11, B, {});
+        for (int h = 1; h <= 4; ++h) t.BlockConnected(h, ALGO_X11, A, {});
+        for (int h = 5; h < 12; ++h) t.BlockConnected(h, ALGO_X11, A, {A, B}, {ALGO_X11, ALGO_X11});
+        return t.GetElderSet(ALGO_X11, /*includeBackfill=*/true).size();
+    };
+    BOOST_CHECK_EQUAL(run(/*rearm=*/0), 2u); // legacy: B backfilled with blocks_solved==1
+    BOOST_CHECK_EQUAL(run(/*rearm=*/1), 1u); // post-rearm: B needs >= 3, excluded
+}
+
 BOOST_AUTO_TEST_SUITE_END()

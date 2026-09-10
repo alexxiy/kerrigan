@@ -835,7 +835,17 @@ void AddQuorumProbeConnections(const Consensus::LLMQParams& llmqParams, CConnman
 {
     assert(mn_metaman.IsValid());
 
-    if (!IsQuorumPoseEnabled(llmqParams.type, sporkman)) {
+    // v1.3.2: decouple connection WARM-UP from SPORK_23. On mainnet SPORK_23 is
+    // hardened OFF, which made this whole function dead code: every intra-quorum
+    // link was dialled cold at the Initialized phase -- seconds long during a
+    // block burst -- and members that could not connect in time were dropped from
+    // the round and PoSe-penalized. Probing is only connection scheduling; the
+    // PoSe *punishment* consumer of probe results (VerifyConnectionAndMinProto-
+    // Versions) keeps its own SPORK_23 gate, so enabling probes adds no penalty
+    // path. Gated on the v1.3.2 fork height so pre-rearm behaviour is unchanged.
+    const bool fRearmProbes = util_params.m_base_index != nullptr &&
+                              Params().GetConsensus().IsHMPRearmActive(util_params.m_base_index->nHeight);
+    if (!IsQuorumPoseEnabled(llmqParams.type, sporkman) && !fRearmProbes) {
         return;
     }
 

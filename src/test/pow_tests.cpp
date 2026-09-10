@@ -974,4 +974,208 @@ BOOST_AUTO_TEST_CASE(daa_lwma_activation_dispatch)
     BOOST_CHECK(gotHivemind != gotLwma);
 }
 
+
+/* ======================================================================
+ * v1.3.2: LWMA stranded-algo bounded gap reset (gated at nHMPRearmHeight)
+ * ====================================================================== */
+
+// Mixed-algo synthetic chain: entries are (algo, time); KawPoW blocks carry
+// `kawBits`, every other algo a fixed unrelated nBits (LwmaPerAlgo(KAWPOW) never
+// reads them -- it only walks same-algo blocks and the tip height).
+static std::vector<CBlockIndex> BuildMixedChain(const std::vector<std::pair<int, int64_t>>& spec, unsigned int kawBits)
+{
+    std::vector<CBlockIndex> blocks(spec.size());
+    for (size_t i = 0; i < spec.size(); ++i) {
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = static_cast<int>(i);
+        blocks[i].nTime = static_cast<uint32_t>(spec[i].second);
+        blocks[i].nBits = spec[i].first == ALGO_KAWPOW ? kawBits : 0x1a56f984U;
+        blocks[i].nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(spec[i].first);
+    }
+    return blocks;
+}
+
+/* 70 steady KawPoW blocks, then 44 X11 blocks: KawPoW gap = 44 >= 40 threshold.
+ * Post-rearm: eased 4x per missed round -> nSteps = 1 + (44-40)/4 = 2 -> 16x
+ * easier than the last KawPoW target (still below the permissive pre-floor
+ * powLimit, so uncapped). Pre-rearm: plain LWMA (different value). */
+BOOST_AUTO_TEST_CASE(daa_lwma_rearm_stranded_algo_gap_reset)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+
+    std::vector<std::pair<int, int64_t>> spec;
+    int64_t t = 1700000000LL;
+    for (int i = 0; i < 70; ++i) { spec.emplace_back(ALGO_KAWPOW, t); t += 480; }
+    for (int i = 0; i < 44; ++i) { spec.emplace_back(ALGO_X11, t); t += 120; }
+    std::vector<CBlockIndex> blocks = BuildMixedChain(spec, LWMA_KHARD);
+    CBlockHeader hdr; hdr.nTime = blocks.back().nTime + 480;
+
+    consensus.nHMPRearmHeight = 0; // pre-rearm: byte-identical LWMA path
+    const unsigned int pre = GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW);
+
+    consensus.nHMPRearmHeight = 1;
+    const unsigned int post = GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW);
+
+    arith_uint256 expected; expected.SetCompact(LWMA_KHARD); expected <<= 4; // 4x * 4x
+    BOOST_CHECK_EQUAL(post, expected.GetCompact());
+    BOOST_CHECK(post != pre);
+    // Sanity: eased target is EASIER (larger) than the stale one.
+    arith_uint256 stale; stale.SetCompact(LWMA_KHARD);
+    arith_uint256 got;   got.SetCompact(post);
+    BOOST_CHECK(got > stale);
+}
+
+/* Single same-algo block in range + gap 41: pre-rearm snaps to the bootstrap
+ * powLimit (the burst-seeding cliff); post-rearm eases 4x from the stale target. */
+BOOST_AUTO_TEST_CASE(daa_lwma_rearm_single_block_eases_not_snaps)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+
+    std::vector<std::pair<int, int64_t>> spec;
+    int64_t t = 1700000000LL;
+    spec.emplace_back(ALGO_KAWPOW, t); t += 480;
+    for (int i = 0; i < 41; ++i) { spec.emplace_back(ALGO_X11, t); t += 120; }
+    std::vector<CBlockIndex> blocks = BuildMixedChain(spec, LWMA_KHARD);
+    CBlockHeader hdr; hdr.nTime = blocks.back().nTime + 480;
+
+    consensus.nHMPRearmHeight = 0;
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW),
+                      UintToArith256(consensus.powLimitAlgo[ALGO_KAWPOW]).GetCompact()); // the snap
+
+    consensus.nHMPRearmHeight = 1;
+    arith_uint256 expected; expected.SetCompact(LWMA_KHARD); expected <<= 2; // one 4x step
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW), expected.GetCompact());
+}
+
+
+/* ======================================================================
+ * v1.3.2: DYNAMIC coin-hopper vs the REAL per-algo DAA
+ *
+ * Event-driven 4-algo miner that drives the actual GetNextWorkRequired /
+ * LwmaPerAlgo consensus code block-by-block against a scripted profit-switching-multipool
+ * hopper (189x honest hashrate, from the 2026-09-06 mainnet calibration). Unlike
+ * the static daa_lwma_* cases, this evolves difficulty over a full attack cycle:
+ *   warmup  -> all 4 algos ~equal (LWMA windows fill),
+ *   attack  -> x11 hashrate x189 (floods cheap blocks; LWMA must chase it up),
+ *   abandon -> x11 hashrate ~0 (stranded high; other 3 carry the chain until the
+ *              x11 gap exceeds the reset threshold).
+ * Run twice -- rearm OFF (plain LWMA) vs ON (LWMA + the stranded-algo gap reset) --
+ * to prove on real code: (1) LWMA does raise x11 difficulty during the burst, and
+ * (2) the gap reset eases a stranded algo far faster than plain LWMA (shorter stall).
+ * ====================================================================== */
+
+// Expected hashes to find a block at compact target `bits` (== GetBlockProof math).
+static arith_uint256 WorkForBits(unsigned int bits)
+{
+    arith_uint256 t; bool neg=false, of=false; t.SetCompact(bits, &neg, &of);
+    if (neg || of || t == 0) return arith_uint256(1);
+    return (~t / (t + 1)) + 1;
+}
+
+BOOST_AUTO_TEST_CASE(daa_lwma_dynamic_hopper_defense)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params c = chainParams->GetConsensus();
+    c.nDaaLwmaHeight = 1;                       // LWMA from block 1
+    const int64_t T = (int64_t)c.nPowTargetSpacing * NUM_ALGOS; // 480
+
+    // Phases (chain heights): warmup (all 4 algos ~equal), attack (x11 x189),
+    // then STRAND (mine only the other 3 algos so x11's chain-gap exceeds the
+    // NUM_ALGOS*10 = 40-block reset threshold).
+    const int WARM = 320, ATK = 180, STRAND = 60;
+    const int TOTAL = WARM + ATK + STRAND;
+    std::vector<CBlockIndex> chain(TOTAL);      // pre-sized: CBlockIndex copy-ctor is protected
+
+    unsigned int bits[NUM_ALGOS];
+    arith_uint256 H0[NUM_ALGOS];
+    for (int a = 0; a < NUM_ALGOS; ++a) {
+        arith_uint256 tgt = UintToArith256(c.powLimitFloorAlgo[a]) >> 4; // 16x harder than floor
+        bits[a] = tgt.GetCompact();
+        arith_uint256 h = WorkForBits(bits[a]) / (uint64_t)T;
+        H0[a] = (h == 0) ? arith_uint256(1) : h;
+    }
+    int64_t last_time[NUM_ALGOS];
+    const int64_t t0 = 1700000000LL;
+    for (int a = 0; a < NUM_ALGOS; ++a) last_time[a] = t0;
+
+    auto hashrate = [&](int a, int height) -> arith_uint256 {
+        if (a == ALGO_X11 && height >= WARM && height < WARM + ATK) return H0[ALGO_X11] * (uint64_t)189;
+        return H0[a];
+    };
+
+    int cheap_early = 0, cheap_late = 0, last_x11_h = -1;
+    double x11_diff_warm = 0, x11_diff_peak = 0;
+    unsigned int x11_bits_stranded = bits[ALGO_X11];
+
+    for (int height = 0; height < TOTAL; ++height) {
+        const bool strand_phase = height >= WARM + ATK;
+        int win = -1; int64_t best = std::numeric_limits<int64_t>::max();
+        for (int a = 0; a < NUM_ALGOS; ++a) {
+            if (strand_phase && a == ALGO_X11) continue;   // x11 abandoned: only 3 algos mine
+            arith_uint256 st = WorkForBits(bits[a]) / hashrate(a, height);
+            int64_t finish = last_time[a] + std::max<int64_t>(1, (int64_t)st.GetLow64());
+            if (finish < best) { best = finish; win = a; }
+        }
+        CBlockIndex& idx = chain[height];
+        idx.pprev = height ? &chain[height - 1] : nullptr;
+        idx.nHeight = height;
+        idx.nTime = (uint32_t)best;
+        idx.nBits = bits[win];
+        idx.nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(win);
+        int64_t solvetime = best - last_time[win];
+        last_time[win] = best;
+
+        if (win == ALGO_X11) {
+            arith_uint256 w = WorkForBits(bits[ALGO_X11]);
+            if (height < WARM) x11_diff_warm = w.getdouble();
+            if (height >= WARM && height < WARM + ATK) {
+                x11_diff_peak = std::max(x11_diff_peak, w.getdouble());
+                if (height < WARM + ATK/3 && solvetime < T/4) cheap_early++;
+                if (height >= WARM + 2*ATK/3 && solvetime < T/4) cheap_late++;
+                x11_bits_stranded = bits[ALGO_X11];
+            }
+            last_x11_h = height;
+        }
+        CBlockHeader hdr; hdr.nTime = (uint32_t)(best + 1);
+        bits[win] = GetNextWorkRequired(&chain[height], &hdr, c, win);
+    }
+
+    // x11 has now been idle for (TOTAL-1 - last_x11_h) chain blocks.
+    const int x11_gap = (TOTAL - 1) - last_x11_h;
+    CBlockHeader hdr; hdr.nTime = chain[TOTAL-1].nTime + 1;
+    Consensus::Params off = c; off.nHMPRearmHeight = 0;   // plain LWMA
+    Consensus::Params on  = c; on.nHMPRearmHeight  = 1;   // + stranded-algo gap reset
+    unsigned int bits_off = GetNextWorkRequired(&chain[TOTAL-1], &hdr, off, ALGO_X11);
+    unsigned int bits_on  = GetNextWorkRequired(&chain[TOTAL-1], &hdr, on,  ALGO_X11);
+    arith_uint256 tgt_off; tgt_off.SetCompact(bits_off);
+    arith_uint256 tgt_on;  tgt_on.SetCompact(bits_on);
+    arith_uint256 tgt_strand; tgt_strand.SetCompact(x11_bits_stranded);
+
+    BOOST_TEST_MESSAGE("=== dynamic hopper vs real DAA (189x x11 burst) ===");
+    BOOST_TEST_MESSAGE("x11 diff: warm=" + std::to_string((long long)x11_diff_warm) +
+        " peak=" + std::to_string((long long)x11_diff_peak) +
+        "  (rise " + std::to_string((long long)(x11_diff_peak / std::max(1.0, x11_diff_warm))) + "x)");
+    BOOST_TEST_MESSAGE("cheap x11 blocks early/late = " + std::to_string(cheap_early) + "/" + std::to_string(cheap_late));
+    BOOST_TEST_MESSAGE("x11 stranded gap=" + std::to_string(x11_gap) + " blocks; next-x11 target"
+        " LWMA-only=" + strprintf("0x%08x", bits_off) + " LWMA+reset=" + strprintf("0x%08x", bits_on));
+
+    // (1) LWMA responds to the burst.
+    BOOST_CHECK_MESSAGE(x11_diff_peak > x11_diff_warm * 4.0,
+        "LWMA should raise x11 difficulty >4x during a 189x burst");
+    // (2) LWMA catches up within the burst.
+    BOOST_CHECK_MESSAGE(cheap_late <= cheap_early,
+        "cheap x11 blocks should decline as LWMA catches the burst");
+    // (3) gap is past the reset threshold and the reset EASES the stranded target
+    //     (higher target == lower difficulty) more than plain LWMA does.
+    BOOST_CHECK_MESSAGE(x11_gap >= 40, "x11 should be stranded past the 40-block reset threshold");
+    BOOST_CHECK_MESSAGE(tgt_on > tgt_off,
+        "gap reset should ease the stranded x11 target more than plain LWMA");
+    BOOST_CHECK_MESSAGE(tgt_on > tgt_strand,
+        "gap reset should ease BELOW the stranded difficulty (recover), not stay pinned");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

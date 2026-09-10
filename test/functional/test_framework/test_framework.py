@@ -1160,8 +1160,8 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         """Checks whether the wallet module was compiled with BDB support."""
         return self.config["components"].getboolean("USE_BDB")
 
-MASTERNODE_COLLATERAL = 1000
-EVONODE_COLLATERAL = 4000
+MASTERNODE_COLLATERAL = 10000  # Kerrigan: see src/evo/dmn_types.h (Dash's 1000 was inherited)
+EVONODE_COLLATERAL = 40000     # Kerrigan: see src/evo/dmn_types.h (Dash's 4000 was inherited)
 
 class MasternodeInfo:
     proTxHash: str = ""
@@ -1519,6 +1519,11 @@ class KerriganTestFramework(BitcoinTestFramework):
         ])
 
     def set_kerrigan_test_params(self, num_nodes, masterodes_count, extra_args=None, evo_count=0):
+        # Masternode tests fund collateral from node0's wallet, so the
+        # deterministic coinbase key MUST be imported (otherwise the
+        # 'generate until balance >= collateral' loop in setup_nodes never
+        # terminates -- observed running to h=103k on v1.3.2 regtest).
+        self._requires_wallet = True
         self.mn_count = masterodes_count
         self.evo_count = evo_count
         self.num_nodes = num_nodes
@@ -1709,6 +1714,41 @@ class KerriganTestFramework(BitcoinTestFramework):
 
         assert_equal(protx_success, not should_be_rejected)
 
+    CONSOLIDATE_CHUNK = 3000
+
+    def consolidate_coins(self, node, required_balance):
+        """Merge the wallet's thousands of small coinbase UTXOs into
+        CONSOLIDATE_CHUNK-sized ones so a masternode collateral can be funded
+        without a too-large transaction. Each new chunk is LOCKED so coin
+        selection cannot respend it; because listunspent EXCLUDES locked outputs,
+        the accumulated chunks are tracked in `locked` here rather than re-derived
+        from listunspent each round (that was the bug that stalled at 1 chunk)."""
+        chunk = self.CONSOLIDATE_CHUNK
+        need = int(required_balance // chunk) + 2
+        addr = node.getnewaddress()
+        locked = []
+        for _ in range(need * 4):
+            if len(locked) >= need:
+                break
+            try:
+                node.sendtoaddress(addr, chunk)
+            except JSONRPCException as e:
+                if "Insufficient funds" in str(e):
+                    break
+                raise
+            self.bump_mocktime(1)
+            self.generate(node, 1, sync_fun=self.no_op)
+            fresh = [u for u in node.listunspent(1)
+                     if u["amount"] >= chunk - 1 and u["address"] == addr]
+            if fresh:
+                node.lockunspent(False, [{"txid": u["txid"], "vout": u["vout"]} for u in fresh])
+                locked += [(u["txid"], u["vout"]) for u in fresh]
+        node.lockunspent(True)  # release for prepare_masternodes
+        assert len(locked) >= need - 1, \
+            "consolidate_coins: built %d/%d chunks of %d for required %s" % (
+                len(locked), need, chunk, required_balance)
+        self.log.info("Consolidated wallet into %d chunks of %d" % (len(locked), chunk))
+
     def prepare_masternodes(self):
         self.log.info("Preparing %d masternodes" % self.mn_count)
         for idx in range(0, self.mn_count):
@@ -1819,9 +1859,16 @@ class KerriganTestFramework(BitcoinTestFramework):
         required_balance = EVONODE_COLLATERAL * self.evo_count
         required_balance += MASTERNODE_COLLATERAL * (self.mn_count - self.evo_count) + 100
         self.log.info("Generating %d coins" % required_balance)
-        while self.nodes[0].getbalance() < required_balance:
+        # One consolidation chunk of headroom so collateral + fees never run tight.
+        while self.nodes[0].getbalance() < required_balance + self.CONSOLIDATE_CHUNK:
             self.bump_mocktime(1)
             self.generate(self.nodes[0], 10, sync_fun=self.no_op)
+
+        # Kerrigan: the miner's coinbase share is 10 KRGN/block (40% of 25), so the
+        # wallet now holds thousands of small UTXOs. A single 10000-KRGN collateral
+        # send would need ~1000 inputs and exceed the max tx size. Consolidate into
+        # CONSOLIDATE_CHUNK-sized UTXOs first (~300 inputs each), one block between.
+        self.consolidate_coins(self.nodes[0], required_balance)
 
         # create masternodes
         self.prepare_masternodes()

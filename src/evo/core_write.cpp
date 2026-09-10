@@ -167,6 +167,11 @@ RPCResult CCbTx::GetJsonHelp(const std::string& key, bool optional)
             {{RPCResult::Type::NUM, "", "Algorithm identifier"}}},
         {RPCResult::Type::ARR, "vCommitments", /*optional=*/true, "HMP pubkey commitments (v5+)",
             {{RPCResult::Type::STR_HEX, "", "BLS public key commitment"}}},
+        {RPCResult::Type::ARR, "vSealSignerVRFProofs", /*optional=*/true, "Per-signer VRF proofs, parallel to vSealSigners (v6+)",
+            {{RPCResult::Type::STR_HEX, "", "BLS signature (VRF proof)"}}},
+        {RPCResult::Type::ARR, "vCommitmentSigs", /*optional=*/true, "Per-commitment self-signatures, parallel to vCommitments (v6+)",
+            {{RPCResult::Type::STR_HEX, "", "BLS signature"}}},
+        {RPCResult::Type::STR_HEX, "minerIdentitySig", /*optional=*/true, "Signature by minerIdentity over (height, parent, payout script) (v6+)"},
     }};
 }
 
@@ -202,6 +207,15 @@ UniValue CCbTx::ToJson() const
                         commitments.push_back(commitment.ToString());
                     }
                     ret.pushKV("vCommitments", commitments);
+                }
+                if (nVersion >= CCbTx::Version::HMP_REARM) {
+                    UniValue proofs(UniValue::VARR);
+                    for (const auto& p : vSealSignerVRFProofs) proofs.push_back(p.ToString());
+                    ret.pushKV("vSealSignerVRFProofs", proofs);
+                    UniValue csigs(UniValue::VARR);
+                    for (const auto& sg : vCommitmentSigs) csigs.push_back(sg.ToString());
+                    ret.pushKV("vCommitmentSigs", csigs);
+                    ret.pushKV("minerIdentitySig", minerIdentitySig.ToString());
                 }
             }
         }

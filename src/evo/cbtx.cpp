@@ -5,6 +5,7 @@
 #include <consensus/validation.h>
 #include <evo/cbtx.h>
 #include <evo/specialtx.h>
+#include <hmp/commitment.h>
 #include <llmq/blockprocessor.h>
 #include <llmq/commitment.h>
 #include <llmq/options.h>
@@ -18,6 +19,17 @@
 #include <deploymentstatus.h>
 
 using node::ReadBlockFromDisk;
+
+uint256 CCbTx::MinerIdentitySignatureHash(int32_t nHeight, const uint256& hashPrevBlock,
+                                          const CScript& payoutScript)
+{
+    CHashWriter hw(SER_GETHASH, 0);
+    hw << std::string("HMP-IDENT");
+    hw << nHeight;
+    hw << hashPrevBlock;
+    hw << payoutScript;
+    return hw.GetHash();
+}
 
 bool CheckCbTx(const CCbTx& cbTx, const CBlockIndex* pindexPrev, TxValidationState& state)
 {
@@ -40,9 +52,28 @@ bool CheckCbTx(const CCbTx& cbTx, const CBlockIndex* pindexPrev, TxValidationSta
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-version");
         }
 
-        const bool fHMPActive{DeploymentActiveAfter(pindexPrev, Params().GetConsensus(), Consensus::DEPLOYMENT_HMP)};
+        // HMP coinbase versions (v4+) extend the V20 layout (v3), so the HMP
+        // version band is only reachable once V20 is active. On every real
+        // network HMP activates at/after V20 (mainnet 100 > 2, testnet 20 > 2,
+        // devnet 2 = 2) so this conjunction is byte-identical there; on regtest
+        // (HMP from genesis, V20 at DIP3 height) it resolves an impossible state
+        // where the HMP gate demanded >= v4 while the V20 gate rejected >= v3 and
+        // NO coinbase version was valid -- regtest was unminable under the
+        // functional harness. The miner applies the same conjunction.
+        const bool fHMPActive{isV20 && DeploymentActiveAfter(pindexPrev, Params().GetConsensus(), Consensus::DEPLOYMENT_HMP)};
         if ((fHMPActive && cbTx.nVersion < CCbTx::Version::HMP_SEAL) ||
             (!fHMPActive && cbTx.nVersion >= CCbTx::Version::HMP_SEAL)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-version");
+        }
+
+        // v1.3.2 HMP_REARM (v6) TWO-SIDED gate. Unlike v5 (HMP_COMMITMENT), which
+        // is optional forever, v6 is MANDATORY at/after nHMPRearmHeight and
+        // REJECTED before it -- so the on-chain VRF proofs / self-signatures the
+        // re-arm economics depend on cannot simply be omitted. Keyed on the height
+        // of the block being connected (pindexPrev->nHeight + 1 == cbTx.nHeight).
+        const bool fRearm{Params().GetConsensus().IsHMPRearmActive(cbTx.nHeight)};
+        if ((fRearm && cbTx.nVersion < CCbTx::Version::HMP_REARM) ||
+            (!fRearm && cbTx.nVersion >= CCbTx::Version::HMP_REARM)) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-version");
         }
     }
@@ -54,6 +85,35 @@ bool CheckCbTx(const CCbTx& cbTx, const CBlockIndex* pindexPrev, TxValidationSta
     for (uint8_t algo : cbTx.vSealSignerAlgos) {
         if (algo >= NUM_ALGOS) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-seal-algo");
+        }
+    }
+
+    // HMP_REARM (v6) structural checks. v6 only exists at/after nHMPRearmHeight
+    // (enforced by the gate above), so these are unreachable on the pre-fork
+    // chain. The new proof/sig vectors are index-parallel to the vectors they
+    // authenticate; length mismatch is invalid. (Cryptographic verification of
+    // the VRF proofs, commitment self-sigs and miner-identity sig is applied in
+    // ConnectBlock / the seal-weight path, which has the chain context the VRF
+    // input and block-binding messages require.)
+    if (cbTx.nVersion >= CCbTx::Version::HMP_REARM) {
+        if (cbTx.vSealSignerVRFProofs.size() != cbTx.vSealSigners.size()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-vrf-parity");
+        }
+        if (cbTx.vCommitmentSigs.size() != cbTx.vCommitments.size()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-commitment-sig-parity");
+        }
+        // B-03: every embedded commitment must carry a valid self-signature by the
+        // committed key over CPubKeyCommit::SignatureHash (the same message the p2p
+        // PUBKEYCOMMIT already uses), proving the committer controls the pubkey.
+        // Pure function of the payload bytes -> checked here so ConnectBlock and
+        // RollforwardBlock both get it via ProcessSpecialTxsInBlock. <=16 verifies.
+        for (size_t i = 0; i < cbTx.vCommitments.size(); i++) {
+            const CBLSPublicKey& pk = cbTx.vCommitments[i];
+            const CBLSSignature& sig = cbTx.vCommitmentSigs[i];
+            if (!pk.IsValid() || !sig.IsValid() ||
+                !sig.VerifyInsecure(pk, CPubKeyCommit::SignatureHash(pk), false /* basic scheme */)) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cbtx-commitment-sig");
+            }
         }
     }
 

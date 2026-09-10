@@ -12,6 +12,8 @@
 #include <hmp/identity.h>
 #include <hmp/privilege.h>
 #include <hmp/seal_manager.h>
+#include <node/context.h>
+#include <spork.h>
 #include <univalue.h>
 #include <validation.h>
 
@@ -47,6 +49,20 @@ static RPCHelpMan gethmpinfo()
                 {RPCResult::Type::STR, "tier_equihash192", "privilege tier for Equihash(192,7)"},
                 {RPCResult::Type::NUM, "privileged_count", "total unique privileged participants"},
                 {RPCResult::Type::NUM, "window_height", "current privilege window tip height"},
+                {RPCResult::Type::BOOL, "spork25_hmp_enabled", "SPORK_25_HMP_ENABLED runtime kill switch (seal production)"},
+                {RPCResult::Type::NUM, "rearm_height", "v1.3.2 unified fork height (0 = never)"},
+                {RPCResult::Type::BOOL, "rearm_active", "whether the v1.3.2 re-arm rules are active at the current height"},
+                {RPCResult::Type::ARR, "algos", "per-algo re-arm economics state",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::NUM, "algo", "algorithm id"},
+                        {RPCResult::Type::STR, "name", "algorithm name"},
+                        {RPCResult::Type::NUM, "organic_elders", "Elders WITHOUT dominance-catch backfill (the arming count)"},
+                        {RPCResult::Type::NUM, "elders", "Elders including dominance-catch backfill"},
+                        {RPCResult::Type::BOOL, "penalty_armed", "whether negative-proof penalties are armed for this algo (stateless rule)"},
+                    }},
+                }},
             }
         },
         RPCExamples{
@@ -100,6 +116,30 @@ static RPCHelpMan gethmpinfo()
                 result.pushKV("tier_equihash192", TierToString(g_hmp_privilege->GetTier(pk, ALGO_EQUIHASH_192)));
                 result.pushKV("privileged_count", (uint64_t)g_hmp_privilege->GetTotalPrivilegedCount());
                 result.pushKV("window_height", g_hmp_privilege->GetTipHeight());
+            }
+
+            // v1.3.2 re-arm observability: the live dashboard for the mainnet flip.
+            {
+                const node::NodeContext& node = EnsureAnyNodeContext(request.context);
+                if (node.sporkman) {
+                    result.pushKV("spork25_hmp_enabled", node.sporkman->IsSporkActive(SPORK_25_HMP_ENABLED));
+                }
+            }
+            result.pushKV("rearm_height", consensus.nHMPRearmHeight);
+            result.pushKV("rearm_active", consensus.IsHMPRearmActive(currentHeight));
+            if (g_hmp_privilege) {
+                static const char* kAlgoNames[NUM_ALGOS] = {"x11", "kawpow", "equihash200", "equihash192"};
+                UniValue algos(UniValue::VARR);
+                for (int a = 0; a < NUM_ALGOS; a++) {
+                    UniValue o(UniValue::VOBJ);
+                    o.pushKV("algo", a);
+                    o.pushKV("name", kAlgoNames[a]);
+                    o.pushKV("organic_elders", (uint64_t)g_hmp_privilege->GetElderSet(a, /*includeBackfill=*/false).size());
+                    o.pushKV("elders", (uint64_t)g_hmp_privilege->GetElderSet(a).size());
+                    o.pushKV("penalty_armed", g_hmp_privilege->IsPenaltyArmed(a));
+                    algos.push_back(o);
+                }
+                result.pushKV("algos", algos);
             }
 
             return result;

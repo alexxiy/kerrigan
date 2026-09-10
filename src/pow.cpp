@@ -234,9 +234,47 @@ unsigned int LwmaPerAlgo(const CBlockIndex* pindexLast, const Consensus::Params&
         if (p->GetAlgo() == algo) a.push_back(p);
     }
 
+    // Stranded-algo bounded gap reset (v1.3.2, height-gated at nHMPRearmHeight).
+    // Plain LWMA has no rescue for an algo abandoned at high difficulty: it eases
+    // only ~16%/block, so an algo left at m-times its sustainable difficulty takes
+    // ~m hours of long blocks to recover, and past the bounded walk (maxDepth) it
+    // finds < 2 same-algo blocks and snaps STRAIGHT to the floor -- seeding an
+    // instant-block burst plus the k/20 anti-timewarp whiplash the legacy Hivemind
+    // bounded reset was written to prevent. Port that reset here: if this algo has
+    // not produced for >= the legacy gap threshold, ease its last difficulty 4x per
+    // missed round toward the effective floor instead of crawling or snapping.
+    // Pre-rearm this whole block is skipped, so v1.3.1 behaviour is byte-identical.
+    if (params.IsHMPRearmActive(nNextHeight) && !a.empty()) {
+        // Same threshold the legacy DAA used post-nDiffFloorHeight: one full
+        // averaging window (NUM_ALGOS * 10 = 40 blocks) since this algo's last block.
+        const int nGapThreshold = NUM_ALGOS * 10;
+        const int algoGap = pindexLast->nHeight - a[0]->nHeight;
+        if (algoGap >= nGapThreshold) {
+            arith_uint256 bnEased;
+            bnEased.SetCompact(a[0]->nBits);
+            arith_uint256 bnLimit;
+            bnLimit.SetCompact(EffectivePowLimitForAlgo(params, algo, nNextHeight));
+            // 4x easier per missed round (one round = NUM_ALGOS blocks the stalled
+            // algo skipped), capped at the floor so it never eases past the legacy
+            // reset and never wraps past 256 bits when the floor is near 2^254.
+            const int nSteps = 1 + (algoGap - nGapThreshold) / NUM_ALGOS;
+            for (int i = 0; i < nSteps && bnEased < bnLimit; i++) {
+                if (bnEased > (bnLimit >> 2)) {
+                    bnEased = bnLimit;
+                    break;
+                }
+                bnEased <<= 2;
+            }
+            if (bnEased > bnLimit) bnEased = bnLimit;
+            return bnEased.GetCompact();
+        }
+    }
+
     // Bootstrap: need at least two same-algo blocks for one solvetime. On the v1.3.1
     // fork this never fires (pre-fork history holds > N same-algo blocks); it only
-    // matters on a fresh chain.
+    // matters on a fresh chain (or, post-rearm, an algo stranded beyond the maxDepth
+    // walk with zero same-algo blocks in range -- no reference to ease from, floor
+    // is unavoidable).
     if (a.size() < 2) {
         return EffectivePowLimitForAlgo(params, algo, nNextHeight);
     }

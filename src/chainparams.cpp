@@ -336,11 +336,18 @@ public:
         // small chain, where a 2-week window proved too tight): tip 135260 on
         // 2026-08-28 -> 150260, rounded up to 151000 (~21.9 days runway). Sits well
         // under nDeprecationHeight=184000.
-        // ***AT PUBLISH TIME reconfirm runway >= 15,000 blocks against the live tip;
-        // if the build/publish slipped so far that (151000 - tip) < 15,000, bump
-        // this and rebuild before releasing — the runway anchors on binary
-        // availability, not the code-freeze date.***
         consensus.nDaaLwmaHeight = 151000;
+        // v1.3.2 unified consensus fork, activated ahead of the 151000 LWMA
+        // retarget. The HMP re-arm and the per-algo LWMA retarget are
+        // independent regime changes and need not share a flag day; re-arming
+        // first is safe: the non-consensus DKG phase-skip fix (active on
+        // install) and the penalty 66->33 protect quorum formation through the
+        // pre-LWMA cadence, and the LWMA stranded-algo gap reset (inside
+        // LwmaPerAlgo) only engages once LWMA is live at 151000. Kept below the
+        // 151000 flag day. Carries HMP re-arm economics, CCbTx v6 (B-02/B-03/
+        // signed-identity), Elder Sybil fix (B-01), DKG penalty 66->33, and the
+        // LWMA stranded-algo gap reset.
+        consensus.nHMPRearmHeight = 148000;
         // LLMQ_60_60 small-network quorum hard-fork. Enables the DKG for the
         // 60-member quorum type that takes over the ChainLocks / InstantSend /
         // EHF roles from the unformable Dash-sized types (see the long living
@@ -768,6 +775,12 @@ public:
                 // v1.2.6 canonical anchor (pre-prevSealHash-fix activation).
                 {55232, uint256S("0x3da428bd1b2b6e93045f7a19a1745ce9ce5c9494fb39da9ee12a466583d49dc5")},
                 {55237, uint256S("0x00000000000014d2ff0647f4abaebd19c70f81658517cd62ac9a2e3041866a11")},
+                // v1.3.2 anti-reorg anchor. Chainlock-confirmed height 140000
+                // (buried >2000 blocks at ship), pinned to bound the deep-reorg
+                // surface that abandoned-algo low-work blocks open up before the
+                // 151000 per-algo-retarget fork. Deeply buried -> can never reject
+                // the real chain.
+                {140000, uint256S("0x0000000000002983b156e6b12caa4d1afbf61fa245806b07e7d20a3d45002d53")},
             }
         };
 
@@ -859,9 +872,15 @@ public:
         // a settled multi-algo Hivemind history (>N same-algo blocks) before
         // the boundary. Mainnet activates at its own scheduled height.
         consensus.nDaaLwmaHeight = 500;
-        // LLMQ_60_60 small-network quorum: mainnet-only; testnet keeps its
-        // LLMQ_50_60-based roles (that type stays enabled on testnet).
-        consensus.nLLMQ6060Height = 0;
+        // v1.3.2 unified fork on testnet: low so CI/testnet always crosses it
+        // (after LLMQ_60_60 has had time to form quorums, below).
+        consensus.nHMPRearmHeight = 1000;
+        // LLMQ_60_60 small-network quorum: now ENABLED on testnet at a low
+        // height so the mainnet quorum type (and its DKG under bursty block
+        // cadence) is exercisable off-mainnet -- the gap that let the launch
+        // DKG issues ship unseen. Was 0 (disabled), which left LLMQ_60_60 with
+        // no non-mainnet test path.
+        consensus.nLLMQ6060Height = 500;
         // Drone coinbase payouts: off until scheduled (same pattern as the
         // other v1.3.0 forks; set a real height before reviving testnet).
         // Bond/liveness values mirror mainnet so arming is a one-line change.
@@ -1316,7 +1335,12 @@ class CRegTestParams : public CChainParams {
 public:
     explicit CRegTestParams(const ArgsManager& args) {
         strNetworkID =  CBaseChainParams::REGTEST;
-        consensus.nSubsidyHalvingInterval = 150;
+        // v1.3.2: regtest halving aligned with the other networks. Dash's 150-block
+        // regtest halving assumed Dash's 500-coin reward; with Kerrigan's 25-coin
+        // subsidy it capped the ENTIRE minable supply at 7500 (miner share 3000),
+        // so the masternode functional framework could never fund a single
+        // 10000-KRGN collateral and its funding loop ran forever. Regtest-only.
+        consensus.nSubsidyHalvingInterval = 1051200;
         consensus.nMasternodePaymentsStartBlock = 1;
         consensus.nMasternodePaymentsIncreaseBlock = 2100000000;
         consensus.nMasternodePaymentsIncreasePeriod = 1;
@@ -1481,7 +1505,13 @@ public:
         nPoolMinParticipants = 2;
         nPoolMaxParticipants = 20;
 
-        vSporkAddresses = {"kSN8WQ66mTWeWBvqGWMSQ3dWv2itCLf4i1"};
+        // v1.3.2: regtest spork address is the address of the functional-test
+        // framework's regtest spork key (cP4EK...; see test_framework.py) under
+        // the regtest PUBKEY_ADDRESS prefix (140). It had been a key nobody
+        // holds since v1.0.2, so every masternode/LLMQ functional test failed at
+        // node0 startup ("Unable to sign spork message") -- which is how the
+        // launch DKG issues shipped un-exercised. Regtest-only; no mainnet effect.
+        vSporkAddresses = {"yj949n1UH6fDhw6HtVE5VMj2iSTaSWBMcW"};
         nMinSporkKeys = 1;
 
         nCreditPoolPeriodBlocks = 100;
@@ -1508,7 +1538,10 @@ public:
         };
 
         // Regtest Kerrigan addresses start with 'k'
-        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1, 107);
+        // v1.3.2: regtest pubkey prefix aligned to the inherited Dash test harness
+        // (140, 'y...'), so its 58 hard-coded regtest address literals across 21
+        // functional tests are valid. Regtest-only; mainnet(45)/testnet(107) untouched.
+        base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1, 140);
         // Regtest Kerrigan script addresses start with '8' or '9'
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1, 19);
         // Regtest private keys start with '9' or 'c' (Bitcoin defaults)
@@ -1686,6 +1719,12 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // (Hivemind window + rebalance) and post-fork (per-algo LWMA)
             // blocks in the same run.
             consensus.nDaaLwmaHeight = int{height};
+        } else if (name == "hmp_rearm") {
+            // v1.3.2 unified fork. Lets regtest tests mine pre-rearm (v5 cbtx,
+            // current penalty/phase, plain LWMA) and post-rearm (v6 cbtx with
+            // VRF/self-sig, penalty 33, longer phases, LWMA gap reset) blocks
+            // in the same run.
+            consensus.nHMPRearmHeight = int{height};
         } else if (name == "dronepayout") {
             // Inference-drone coinbase payout fork. Lets regtest tests mine
             // pre-fork (escrow slot) and post-fork (drone payee slot) blocks
@@ -2070,7 +2109,7 @@ void SetupChainParamsOptions(ArgsManager& argsman)
     argsman.AddArg("-llmqtestplatformparams=<size>:<threshold>", "Override the default LLMQ size for the LLMQ_TEST_PLATFORM quorum (default: 3:2, regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-minimumdifficultyblocks=<n>", "The number of blocks that can be mined with the minimum difficulty at the start of a chain (default: 0, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-powtargetspacing=<n>", "Override the default PowTargetSpacing value in seconds (default: 120s, devnet-only)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, withdrawals, dronepayout, escrowburn). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, daa_lwma, hmp_rearm, withdrawals, dronepayout, escrowburn). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-dronesnapshotperiod=<n>", "Override the drone-list full-snapshot interval in blocks (default: 576). Local storage layout only, never consensus. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-vbparams=<deployment>:<start>:<end>(:min_activation_height(:<window>:<threshold/thresholdstart>(:<thresholdmin>:<falloffcoeff>:<mnactivation>)))",
                  "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only). "

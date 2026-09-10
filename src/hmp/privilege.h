@@ -63,6 +63,18 @@ struct CHMPWindowEntry {
     CBLSPublicKey minerPubKey;
     std::vector<CBLSPublicKey> sealSigners; // who signed the seal in this block
     std::vector<uint8_t> signerAlgos;       // each signer's declared algo
+    // v1.3.2: algo of the SEALED ancestor this block's seal covers (-1 = no
+    // verified seal embedded). Drives the per-algo penalty arming (§1).
+    int sealedAlgo{-1};
+};
+
+/** v1.3.2: minimal 400-block lookback used ONLY by the stateless arming HOLD
+ *  condition (§1). Pure per-block facts, so RebuildHMPState reconstructs it
+ *  bit-identically from the 1100-block replay. */
+struct CHMPSealLongEntry {
+    int height;
+    int algo;        // enclosing block's algo
+    int sealedAlgo;  // sealed ancestor's algo, or -1
 };
 
 /** Lightweight entry for extended lookback (dominance catch). Tracks only solver identity. */
@@ -90,7 +102,6 @@ private:
     int m_minBlocksSolved; // from consensus params (default 1) -- legacy fallback
     int m_dominanceCatchFloor; // min unique pools per algo (default 6)
     int m_extendedWindowSize;  // max extended lookback (default 1000)
-    int m_broodDemotionDuration; // blocks to stay demoted after equivocation (default 1000)
 
     // Non-owning pointer to the chain's consensus params, captured at construction.
     // Used by GetTier / GetElderSet to query GetEffectiveMinBlocksSolved(height) so
@@ -102,11 +113,10 @@ private:
 
     const IMasternodeLookup* m_mnLookup{nullptr}; // non-owning, for BROOD tier queries
 
-    // Equivocation demotion: pubkey -> demotedUntilHeight (per-algo)
-    std::map<CBLSPublicKey, int> m_demotions[NUM_ALGOS] GUARDED_BY(cs);
-
     // Sliding window of recent blocks (privilege computation)
     std::deque<CHMPWindowEntry> m_window GUARDED_BY(cs);
+
+    std::deque<CHMPSealLongEntry> m_sealLong GUARDED_BY(cs);
 
     // Extended window for dominance catch (lightweight, up to 1000 blocks)
     std::deque<CHMPExtendedEntry> m_extendedWindow GUARDED_BY(cs);
@@ -128,9 +138,12 @@ private:
     std::vector<CBLSPublicKey> GetExtendedSolvers(int algo, int count) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
 public:
+    // v1.3.2 §1: 400-block seal-presence lookback for the arming HOLD condition.
+    // Public so RebuildHMPState can size its replay depth against it (validation.cpp).
+    static constexpr int SEAL_LONG_WINDOW = 400;
+
     CHMPPrivilegeTracker() : m_windowSize(100), m_warmupBlocks(10), m_minBlocksSolved(1),
-                             m_dominanceCatchFloor(6), m_extendedWindowSize(1000),
-                             m_broodDemotionDuration(1000) {}
+                             m_dominanceCatchFloor(6), m_extendedWindowSize(1000) {}
 
     explicit CHMPPrivilegeTracker(const Consensus::Params& params);
 
@@ -143,7 +156,8 @@ public:
      *  under the signer's own algo, not the block algo. */
     void BlockConnected(int height, int algo, const CBLSPublicKey& minerPubKey,
                         const std::vector<CBLSPublicKey>& sealSigners,
-                        const std::vector<uint8_t>& signerAlgos = {});
+                        const std::vector<uint8_t>& signerAlgos = {},
+                        int sealedAlgo = -1);
 
     /** Called when a block is disconnected (reorg). Pops from window. */
     void BlockDisconnected(int height);
@@ -159,8 +173,21 @@ public:
      *  Test-only API -- not used in production paths. */
     uint32_t GetEffectiveWeight(const CBLSPublicKey& pubkey, int algo) const;
 
-    /** Get all Elder pubkeys for a given algo */
-    std::vector<CBLSPublicKey> GetElderSet(int algo) const;
+    /** Get all Elder pubkeys for a given algo.
+     *  @param includeBackfill  true (default): apply the PRD 4.6.3 dominance-catch
+     *         backfill toward the floor. false: ORGANIC Elders only -- the count the
+     *         v1.3.2 §1 arming rule uses, so backfilled low-activity identities can
+     *         never arm penalties (review F10). */
+    std::vector<CBLSPublicKey> GetElderSet(int algo, bool includeBackfill = true) const;
+
+    /** v1.3.2 §1: are negative-proof penalties ARMED for this algo at the current
+     *  tracker state? STATELESS -- a pure function of the last 100 blocks (ARM) and
+     *  the last 400 blocks (HOLD), evaluated from PARENT state by ConnectBlock:
+     *    ARM : sealed100/algoBlocks100 >= 60%, sealed100 >= 8, organic Elders >= 4,
+     *          >= 4 distinct seal-signer identities in the window
+     *    HOLD: sealed400/algoBlocks400 >= 45% and organic Elders >= 3
+     *  Only consulted at/after nHMPRearmHeight (caller gates). */
+    bool IsPenaltyArmed(int algo) const;
 
     /** Get all pubkeys with tier >= NEW for a given algo */
     std::vector<CBLSPublicKey> GetPrivilegedSet(int algo) const;
@@ -173,16 +200,10 @@ public:
 
     int GetTipHeight() const;
 
-    /** Demote a pubkey across all algos (equivocation punishment).
-     *  Demoted keys return UNKNOWN tier for demotionDuration blocks. */
-    void DemotePubkey(const CBLSPublicKey& pubkey, int currentHeight);
-
-    /** Remove expired demotion records */
-    void ClearExpiredDemotions(int currentHeight);
-
-    /** Clear all privilege data (windows + records + demotions). Called when SPORK_25_HMP_ENABLED
-     *  transitions from disabled to enabled, to prevent stale pre-toggle data from
-     *  creating inaccurate Elder windows. */
+    /** Clear all privilege data (windows + records). Called at the HMP height-
+     *  activation boundary (ConnectBlock / RollforwardBlock) and by RebuildHMPState
+     *  before a cold replay. NOT tied to SPORK_25: the tracker is folded from
+     *  on-chain coinbase data regardless of the spork. */
     void Clear();
 };
 

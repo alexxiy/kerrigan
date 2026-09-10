@@ -68,7 +68,7 @@ SPORK_OFF = 4070908800         # far-future sentinel = spork inactive (the defau
 # pre-existing breakage. This address is that same WIF's key encoded with
 # Kerrigan's regtest prefix (107), so the pair below is self-consistent.
 SPORK_KEY = "cP4EKFyJsHT39LDqgdcB43Y3YXjNyjb5Fuas1GQSeAtjnZWmZEQK"
-SPORK_ADDR = "kSz9fCAxr9NJidVS5eEZVDk4wnxSysGbPk"
+SPORK_ADDR = "yj949n1UH6fDhw6HtVE5VMj2iSTaSWBMcW"
 
 # Snapshot periods deliberately DIFFER between the nodes: the snapshot layout
 # is local storage, not consensus, so the two nodes must still agree on every

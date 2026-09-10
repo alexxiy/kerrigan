@@ -34,7 +34,6 @@ CHMPPrivilegeTracker::CHMPPrivilegeTracker(const Consensus::Params& params)
       m_minBlocksSolved(params.nHMPMinBlocksSolved),
       m_dominanceCatchFloor(params.nHMPDominanceCatchFloor),
       m_extendedWindowSize(params.nHMPDominanceCatchMaxLookback),
-      m_broodDemotionDuration(params.nHMPBroodDemotionDuration),
       m_consensus(&params)
 {
 }
@@ -76,7 +75,8 @@ void CHMPPrivilegeTracker::RebuildFromWindow()
 
 void CHMPPrivilegeTracker::BlockConnected(int height, int algo, const CBLSPublicKey& minerPubKey,
                                           const std::vector<CBLSPublicKey>& sealSigners,
-                                          const std::vector<uint8_t>& signerAlgos)
+                                          const std::vector<uint8_t>& signerAlgos,
+                                          int sealedAlgo)
 {
     LOCK(cs);
 
@@ -86,7 +86,14 @@ void CHMPPrivilegeTracker::BlockConnected(int height, int algo, const CBLSPublic
     entry.minerPubKey = minerPubKey;
     entry.sealSigners = sealSigners;
     entry.signerAlgos = signerAlgos;
+    entry.sealedAlgo = sealedAlgo;
     m_window.push_back(std::move(entry));
+
+    // v1.3.2 §1: 400-block seal-presence lookback (arming HOLD condition).
+    m_sealLong.push_back(CHMPSealLongEntry{height, algo, sealedAlgo});
+    while (static_cast<int>(m_sealLong.size()) > SEAL_LONG_WINDOW) {
+        m_sealLong.pop_front();
+    }
 
     // Add to extended window (dominance catch, lightweight, solver identity only)
     if (minerPubKey.IsValid()) {
@@ -149,6 +156,10 @@ void CHMPPrivilegeTracker::BlockDisconnected(int height)
         m_extendedWindow.pop_back();
     }
 
+    while (!m_sealLong.empty() && m_sealLong.back().height >= height) {
+        m_sealLong.pop_back();
+    }
+
     RebuildFromWindow();
 }
 
@@ -183,11 +194,10 @@ HMPPrivilegeTier CHMPPrivilegeTracker::GetTier(const CBLSPublicKey& pubkey, int 
         ? m_consensus->GetEffectiveMinBlocksSolved(currentHeight)
         : m_minBlocksSolved;
     if (rec.blocks_solved >= effMinBlocks && rec.seal_participations > 0) {
-        // Check demotion (equivocation punishment)
-        auto demIt = m_demotions[algo].find(pubkey);
-        if (demIt != m_demotions[algo].end() && currentHeight < demIt->second) {
-            tier = HMPPrivilegeTier::UNKNOWN; // demoted
-        } else if (m_mnLookup && m_mnLookup->IsBroodNodeOperator(pubkey, pindex)) {
+        // (A-01: the equivocation-demotion branch that used to live here was dead
+        // code -- nothing ever populated the demotion map -- and was removed in
+        // v1.3.2. Consensus-inert: the branch could never fire.)
+        if (m_mnLookup && m_mnLookup->IsBroodNodeOperator(pubkey, pindex)) {
             // BROOD: ELDER + active BroodNode operator
             // Pass pindex so the lookup uses the deterministic MN list at this
             // block rather than the (non-deterministic) chain tip.
@@ -279,7 +289,7 @@ std::vector<CBLSPublicKey> CHMPPrivilegeTracker::GetExtendedSolvers(int algo, in
     return solvers;
 }
 
-std::vector<CBLSPublicKey> CHMPPrivilegeTracker::GetElderSet(int algo) const
+std::vector<CBLSPublicKey> CHMPPrivilegeTracker::GetElderSet(int algo, bool includeBackfill) const
 {
     LOCK(cs);
 
@@ -309,7 +319,13 @@ std::vector<CBLSPublicKey> CHMPPrivilegeTracker::GetElderSet(int algo) const
     // recent unique solvers from the extended window who also have seal
     // participation in the standard window. Search broadly to find enough
     // qualified candidates since some may lack current seal participation.
-    if (static_cast<int>(result.size()) < m_dominanceCatchFloor && m_dominanceCatchFloor > 0) {
+    if (includeBackfill && static_cast<int>(result.size()) < m_dominanceCatchFloor && m_dominanceCatchFloor > 0) {
+        // B-01 (v1.3.2, gated at nHMPRearmHeight): the backfill used to admit any
+        // identity with blocks_solved >= 1, undercutting the recalibrated Elder
+        // threshold and letting 1-block Sybils into the Elder set. Post-rearm the
+        // backfill applies the same effective threshold as the organic path.
+        const int backfillMinBlocks =
+            (m_consensus != nullptr && m_consensus->IsHMPRearmActive(currentHeight)) ? effMinBlocks : 1;
         auto extSolvers = GetExtendedSolvers(algo, m_extendedWindowSize);
         for (const auto& pk : extSolvers) {
             if (elderSet.count(pk)) continue; // already an Elder
@@ -323,7 +339,7 @@ std::vector<CBLSPublicKey> CHMPPrivilegeTracker::GetElderSet(int algo) const
                 it->second.first_seen_height >= 0 &&
                 (currentHeight - it->second.first_seen_height) >= m_warmupBlocks &&
                 it->second.seal_participations > 0 &&
-                it->second.blocks_solved >= 1) {
+                it->second.blocks_solved >= backfillMinBlocks) {
                 result.push_back(pk);
                 elderSet.insert(pk);
             }
@@ -391,31 +407,55 @@ int CHMPPrivilegeTracker::GetTipHeight() const
     return m_window.back().height;
 }
 
-void CHMPPrivilegeTracker::DemotePubkey(const CBLSPublicKey& pubkey, int currentHeight)
-{
-    LOCK(cs);
-    int demotedUntil = currentHeight + m_broodDemotionDuration;
-    for (int a = 0; a < NUM_ALGOS; a++) {
-        m_demotions[a][pubkey] = demotedUntil;
-    }
-    LogPrintf("HMP: DEMOTED %s until height %d (equivocation)\n",
-              pubkey.ToString().substr(0, 16), demotedUntil);
-}
+// v1.3.2 §1 arming constants (locked by the G1 simulator, see
+// v132-locked-constants.md). Integer math only -- these are consensus.
+namespace {
+constexpr int ARM_FRAC_PCT      = 60; // sealed100 * 100 >= algoBlocks100 * 60
+constexpr int ARM_MIN_SEALED    = 8;
+constexpr int ARM_MIN_ELDERS    = 4;  // organic
+constexpr int ARM_MIN_DIVERSITY = 4;  // distinct seal-signer identities in window
+constexpr int HOLD_FRAC_PCT     = 45; // sealed400 * 100 >= algoBlocks400 * 45
+constexpr int HOLD_MIN_ELDERS   = 3;  // organic
+} // namespace
 
-void CHMPPrivilegeTracker::ClearExpiredDemotions(int currentHeight)
+bool CHMPPrivilegeTracker::IsPenaltyArmed(int algo) const
 {
     LOCK(cs);
-    for (int a = 0; a < NUM_ALGOS; a++) {
-        for (auto it = m_demotions[a].begin(); it != m_demotions[a].end(); ) {
-            if (currentHeight >= it->second) {
-                LogPrint(BCLog::HMP, "HMP: demotion expired for %s at height %d\n",
-                         it->first.ToString().substr(0, 16), currentHeight);
-                it = m_demotions[a].erase(it);
-            } else {
-                ++it;
+    if (algo < 0 || algo >= NUM_ALGOS) return false;
+
+    // Organic Elders only (no dominance-catch backfill) -- review F10.
+    const int organicElders = static_cast<int>(GetElderSet(algo, /*includeBackfill=*/false).size());
+
+    // 100-block window: this algo's blocks, how many carried a verified seal
+    // covering an ancestor of this algo, and how many distinct identities signed.
+    int algoBlocks100 = 0, sealed100 = 0;
+    std::set<CBLSPublicKey> signers100;
+    for (const auto& e : m_window) {
+        if (e.algo == algo) algoBlocks100++;
+        if (e.sealedAlgo == algo) {
+            sealed100++;
+            for (const auto& pk : e.sealSigners) {
+                if (pk.IsValid()) signers100.insert(pk);
             }
         }
     }
+    const bool arm = organicElders >= ARM_MIN_ELDERS &&
+                     sealed100 >= ARM_MIN_SEALED &&
+                     algoBlocks100 > 0 &&
+                     sealed100 * 100 >= algoBlocks100 * ARM_FRAC_PCT &&
+                     static_cast<int>(signers100.size()) >= ARM_MIN_DIVERSITY;
+    if (arm) return true;
+
+    // 400-block HOLD: keeps a healthy algo armed through short dips without any
+    // path-dependent state (RebuildHMPState reconstructs both windows verbatim).
+    int algoBlocks400 = 0, sealed400 = 0;
+    for (const auto& e : m_sealLong) {
+        if (e.algo == algo) algoBlocks400++;
+        if (e.sealedAlgo == algo) sealed400++;
+    }
+    return organicElders >= HOLD_MIN_ELDERS &&
+           algoBlocks400 > 0 &&
+           sealed400 * 100 >= algoBlocks400 * HOLD_FRAC_PCT;
 }
 
 void CHMPPrivilegeTracker::Clear()
@@ -423,10 +463,10 @@ void CHMPPrivilegeTracker::Clear()
     LOCK(cs);
     m_window.clear();
     m_extendedWindow.clear();
+    m_sealLong.clear();
     for (int a = 0; a < NUM_ALGOS; a++) {
         m_records[a].clear();
-        m_demotions[a].clear();
         m_lastTier[a].clear();
     }
-    LogPrintf("HMP: privilege tracker cleared (spork toggle reset)\n");
+    LogPrintf("HMP: privilege tracker cleared (activation boundary / cold rebuild)\n");
 }

@@ -144,7 +144,25 @@ void ActiveDKGSessionHandler::WaitForNextPhase(std::optional<QuorumPhase> curPha
             break;
         }
         if (curPhase.has_value() && _phase != curPhase) {
-            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due unexpected phase change, _phase=%d, curPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(_phase), curPhase.has_value() ? ToUnderlying(*curPhase) : -1);
+            // Burst tolerance (v1.3.2): ActivateBestChain connects several blocks
+            // in one batch and fires a single UpdatedBlockTip at the final tip, so
+            // the phase scalar can jump forward PAST nextPhase (e.g. Contribute ->
+            // Justify) without ever passing through the intermediate value. The
+            // expectedQuorumHash guard above already proved this is the same round,
+            // and QuorumPhase is monotonic 1..7, so a value greater than curPhase
+            // is a forward jump, never corruption. Do NOT abort the whole 24-block
+            // round: break and let the linear HandleDKGRound chain run each skipped
+            // phase's mandatory start handler (Contribute/Complain/Justify/Commit)
+            // in order -- every following WaitForNextPhase then returns immediately
+            // because phase is already at/after its target. A member too far behind
+            // to have verified contributions abstains cleanly at SendCommitment;
+            // this only rescues members that can still legitimately participate.
+            if (ToUnderlying(_phase) > ToUnderlying(*curPhase)) {
+                LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - arriving late, phase jumped forward _phase=%d, curPhase=%d, nextPhase=%d, catching up\n", __func__, params.name, quorumIndex, ToUnderlying(_phase), ToUnderlying(*curPhase), ToUnderlying(nextPhase));
+                break;
+            }
+            // Genuine backward move within the same quorumHash (intra-window reorg).
+            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due backward phase change, _phase=%d, curPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(_phase), ToUnderlying(*curPhase));
             throw AbortPhaseException();
         }
         if (!shouldNotWait()) {
@@ -231,10 +249,26 @@ void ActiveDKGSessionHandler::SleepBeforePhase(QuorumPhase curPhase, const uint2
             }
             heightTmp = cur_height;
         }
-        if (WITH_LOCK(cs_phase_qhash, return phase != curPhase || quorumHash != expectedQuorumHash)) {
-            // Something went wrong and/or we missed quite a few blocks and it's just too late now
-            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due unexpected phase/expectedQuorumHash change\n", __func__, params.name, quorumIndex);
-            throw AbortPhaseException();
+        {
+            auto [p, qh] = GetPhaseAndQuorumHash();
+            if (qh != expectedQuorumHash) {
+                // A genuinely new round/quorum started under us.
+                LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due unexpected expectedQuorumHash change\n", __func__, params.name, quorumIndex);
+                throw AbortPhaseException();
+            }
+            if (ToUnderlying(p) < ToUnderlying(curPhase)) {
+                // Backward move within the same round (intra-window reorg).
+                LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due backward phase change, phase=%d, curPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(p), ToUnderlying(curPhase));
+                throw AbortPhaseException();
+            }
+            if (p != curPhase) {
+                // Burst tolerance (v1.3.2): blocks connected in one batch pushed the
+                // phase past curPhase while we were sleeping. It is too late to keep
+                // staggering -- stop sleeping and run this phase's start handler now
+                // (mirrors the forward-jump break in WaitForNextPhase). Non-consensus:
+                // only affects local DKG message scheduling.
+                break;
+            }
         }
         if (!runWhileWaiting()) {
             UninterruptibleSleep(std::chrono::milliseconds{100});

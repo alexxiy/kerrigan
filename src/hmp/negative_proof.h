@@ -21,4 +21,16 @@ uint64_t EvaluateNegativeProof(const std::vector<CBLSPublicKey>& signerPubKeys,
                                 int blockAlgo,
                                 const CHMPPrivilegeTracker* privilege);
 
+/**
+ * v1.3.2 (>= nHMPRearmHeight): the ONLY sub-floor penalty left in the ladder.
+ * Elder-ABSENCE penalties are gone post-rearm (the on-chain-verifiable committee
+ * is exactly the set of signers with selected VRF proofs, so absence is not
+ * observable; the unsealed-block floor carries the seal incentive instead).
+ * What remains is the provable-fraud case: a seal whose signers are mostly
+ * strangers to every privilege set ("mannequins", PRD SS4.7.4).
+ * @return 1000 (0.1x) if > 50% of signers are unknown, else 10000 (neutral).
+ */
+uint64_t EvaluateMannequinPenalty(const std::vector<CBLSPublicKey>& signerPubKeys,
+                                  const CHMPPrivilegeTracker* privilege);
+
 #endif // KERRIGAN_HMP_NEGATIVE_PROOF_H

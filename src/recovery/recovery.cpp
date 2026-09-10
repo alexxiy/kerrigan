@@ -2211,10 +2211,45 @@ bool StartupDriftCheck(node::NodeContext& node)
     if (node.chain_helper && node.chain_helper->sapling_state &&
         sapling::IsSaplingActive(Params().GetConsensus(), tip_height) &&
         !node.chain_helper->sapling_state->VerifyBestBlock(tip_hash)) {
-        EnterQuarantine(QuarantineReason::STARTUP_DRIFT,
-                        strprintf("startup: SaplingDB best-block disagrees with active tip %s (height %d) [sapling]",
-                                  tip_hash.ToString(), tip_height));
-        return false;
+        // Tolerate the benign "SaplingDB ahead" case before quarantining.
+        // SaplingDB fsyncs DB_BEST_BLOCK per block; CoinsTip is only durable
+        // at periodic FlushStateToDisk. An unclean shutdown (SIGKILL/OOM/power)
+        // that lands between coin flushes legitimately leaves SaplingDB at
+        // height N with the coin tip at the last flush M < N, on the SAME
+        // branch. That is not corruption: the pending ActivateBestChain
+        // rollforward advances the coin tip to N and ProcessBlock skips the
+        // already-committed blocks (sapling_state.cpp), exactly as ReplayBlocks
+        // already tolerates (validation.cpp "SaplingDB ahead ... will skip
+        // already-committed blocks"). Quarantining here refuses the boot
+        // BEFORE that rollforward runs, bricking a healthy node into a restart
+        // loop. Only a SaplingDB that is BEHIND the tip, or on a DIFFERENT
+        // branch, is genuine drift.
+        bool saplingAhead = false;
+        {
+            LOCK(cs_main);
+            const uint256 saplingBest = node.chain_helper->sapling_state->GetBestBlock();
+            const auto& block_index = node.chainman->BlockIndex();
+            auto it = block_index.find(saplingBest);
+            const CBlockIndex* tip = node.chainman->ActiveTip();
+            if (!saplingBest.IsNull() && it != block_index.end() && tip) {
+                const CBlockIndex* pSaplingBest = &it->second;
+                // Ahead of the coin tip AND a descendant of it on the active
+                // branch (its ancestor at tip height IS the tip).
+                if (pSaplingBest->nHeight > tip_height &&
+                    pSaplingBest->GetAncestor(tip_height) == tip) {
+                    saplingAhead = true;
+                }
+            }
+        }
+        if (!saplingAhead) {
+            EnterQuarantine(QuarantineReason::STARTUP_DRIFT,
+                            strprintf("startup: SaplingDB best-block disagrees with active tip %s (height %d) [sapling]",
+                                      tip_hash.ToString(), tip_height));
+            return false;
+        }
+        LogPrintf("StartupDriftCheck: SaplingDB ahead of coin tip (sapling height %d > tip %d) on the active "
+                  "branch -- benign post-crash state, rollforward will reconcile; not quarantining\n",
+                  node.chain_helper->sapling_state->GetBestBlockHeight(), tip_height);
     }
     return true;
 }

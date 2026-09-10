@@ -168,19 +168,29 @@ static int GetHMPStage(int height, const Consensus::Params& params)
  */
 static void FilterSealSigners(std::vector<CBLSPublicKey>& signers,
                                std::vector<uint8_t>& algos,
+                               std::vector<CBLSSignature>* vrfProofs,
                                const CHMPCommitmentRegistry* registry,
                                const CHMPPrivilegeTracker* privilege,
+                               const Consensus::Params& consensus,
                                int height,
                                int seal_depth,
                                const CBlockIndex* pindex,
                                const char* caller)
 {
+    // vrfProofs (v6/HMP_REARM, B-02) is optional and, when present, index-parallel
+    // to `signers`. It must be carried through EVERY filter step so index alignment
+    // is preserved for the VRF committee check below. nullptr on pre-rearm blocks
+    // (v5 and earlier carry no proofs) -> the proof-carrying and committee steps are
+    // no-ops and behaviour is byte-identical to v1.3.1.
+    const bool fHaveProofs = vrfProofs != nullptr;
+
     // Strip uncommitted signers; maturity checked against sealed ancestor height.
     if (registry && registry->IsEnabled() && !signers.empty()) {
         int sealedHeight = height - seal_depth;
         if (sealedHeight < 0) sealedHeight = 0;
         std::vector<CBLSPublicKey> committed;
         std::vector<uint8_t> committedAlgos;
+        std::vector<CBLSSignature> committedProofs;
         committed.reserve(signers.size());
         committedAlgos.reserve(algos.size());
         for (size_t i = 0; i < signers.size(); i++) {
@@ -189,6 +199,9 @@ static void FilterSealSigners(std::vector<CBLSPublicKey>& signers,
                 if (i < algos.size()) {
                     committedAlgos.push_back(algos[i]);
                 }
+                if (fHaveProofs && i < vrfProofs->size()) {
+                    committedProofs.push_back((*vrfProofs)[i]);
+                }
             } else {
                 LogPrint(BCLog::NET, "HMP: %s: ignoring uncommitted seal signer %s at sealed height %d\n",
                          caller, signers[i].ToString().substr(0, 16), sealedHeight);
@@ -196,28 +209,63 @@ static void FilterSealSigners(std::vector<CBLSPublicKey>& signers,
         }
         signers = std::move(committed);
         algos = std::move(committedAlgos);
+        if (fHaveProofs) *vrfProofs = std::move(committedProofs);
     }
 
-    // Strip signers with no privilege on their signed algo.
-    // Build a new vector to avoid erase-in-place with unsigned index.
+    // Strip signers with no privilege on their signed algo, and -- post-rearm --
+    // signers not selected by the VRF committee for this block (B-02). Folded into
+    // one loop so GetTier is computed once. VRF committee selection is a FILTER
+    // (drop -> no weight), NOT a rejection: a signer's tier can legitimately shift
+    // between share-signing and connect time, so a valid-but-unselected proof just
+    // contributes nothing rather than invalidating the block. The strict validity
+    // of each proof (correct signature over the right VRF input) is enforced
+    // separately in ConnectBlock; here we only apply the selection threshold.
     if (privilege && !signers.empty()) {
+        const bool fVrfSelect = fHaveProofs && consensus.IsHMPRearmActive(height);
         std::vector<CBLSPublicKey> privileged;
         std::vector<uint8_t> privilegedAlgos;
+        std::vector<CBLSSignature> privilegedProofs;
         privileged.reserve(signers.size());
         privilegedAlgos.reserve(algos.size());
         for (size_t i = 0; i < signers.size() && i < algos.size(); i++) {
             HMPPrivilegeTier tier = privilege->GetTier(signers[i], algos[i], pindex);
-            if (tier != HMPPrivilegeTier::UNKNOWN) {
-                privileged.push_back(signers[i]);
-                privilegedAlgos.push_back(algos[i]);
-            } else {
+            if (tier == HMPPrivilegeTier::UNKNOWN) {
                 LogPrint(BCLog::NET, "HMP: %s: removing signer %s with no privilege on algo %d at height %d\n",
                          caller, signers[i].ToString().substr(0, 16), algos[i], height);
+                continue;
+            }
+            if (fVrfSelect) {
+                const bool haveProof = i < vrfProofs->size();
+                if (!haveProof ||
+                    !IsVRFSelected(VRFOutputHash((*vrfProofs)[i]),
+                                   GetVRFTierMultiplier(static_cast<int>(tier)))) {
+                    LogPrint(BCLog::NET, "HMP: %s: removing VRF-unselected signer %s on algo %d at height %d\n",
+                             caller, signers[i].ToString().substr(0, 16), algos[i], height);
+                    continue;
+                }
+            }
+            privileged.push_back(signers[i]);
+            privilegedAlgos.push_back(algos[i]);
+            if (fHaveProofs && i < vrfProofs->size()) {
+                privilegedProofs.push_back((*vrfProofs)[i]);
             }
         }
         signers = std::move(privileged);
         algos = std::move(privilegedAlgos);
+        if (fHaveProofs) *vrfProofs = std::move(privilegedProofs);
     }
+}
+
+/** v1.3.2 §1: algo of the SEALED ancestor a coinbase's seal covers, or -1 when
+ *  the block embeds no seal. Used identically by ConnectBlock, RebuildHMPState and
+ *  RollforwardBlock when folding the privilege window, so the per-algo arming
+ *  counters are a non-recursive fold over block data in all three paths. */
+static int SealedAlgoOf(const CBlockIndex* pindex, const CCbTx& cbTx, const Consensus::Params& consensus)
+{
+    if (!cbTx.sealForAncestor.IsValid() || cbTx.sealBlockHash.IsNull() || cbTx.vSealSigners.empty()) return -1;
+    const CBlockIndex* pSealed = pindex->GetAncestor(pindex->nHeight - consensus.nHMPSealTrailingDepth);
+    if (!pSealed || pSealed->GetBlockHash() != cbTx.sealBlockHash) return -1;
+    return static_cast<int>(pSealed->GetAlgo());
 }
 
 /**
@@ -3133,6 +3181,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         bool fDoPrivilege{false};
         int nPrivHeight{0};
         int nPrivAlgo{0};
+        int nPrivSealedAlgo{-1}; // v1.3.2 §1: sealed ancestor's algo, -1 if no seal
         CBLSPublicKey privMinerIdentity;
         std::vector<CBLSPublicKey> privSigners;
         std::vector<uint8_t> privSignerAlgos;
@@ -3205,6 +3254,24 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 // Stage 2 allows empty identity (miners still registering).
                 if (nHMPStage >= 3 && !cbTx.minerIdentity.IsValid()) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cbtx-no-miner-identity");
+                }
+
+                // v6 (HMP_REARM): the miner must PROVE it controls minerIdentity.
+                // Signature over MinerIdentitySignatureHash(height, parent, coinbase
+                // payout script) -- see cbtx.h. Lives here (not CheckCbTx) because it
+                // needs the coinbase's vout. On-disk blocks re-folded by
+                // RebuildHMPState/RollforwardBlock already passed this at connect.
+                if (hmpConsensus.IsHMPRearmActive(pindex->nHeight) &&
+                    cbTx.nVersion >= CCbTx::Version::HMP_REARM) {
+                    if (block.vtx[0]->vout.empty() || !cbTx.minerIdentity.IsValid() ||
+                        !cbTx.minerIdentitySig.IsValid()) {
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cbtx-miner-identity-sig");
+                    }
+                    const uint256 identMsg = CCbTx::MinerIdentitySignatureHash(
+                        cbTx.nHeight, block.hashPrevBlock, block.vtx[0]->vout[0].scriptPubKey);
+                    if (!cbTx.minerIdentitySig.VerifyInsecure(cbTx.minerIdentity, identMsg, false /* basic */)) {
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cbtx-miner-identity-sig");
+                    }
                 }
 
                 // Store miner identity in block index
@@ -3302,9 +3369,31 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-seal-signature");
                             }
 
-                            // VRF re-verification against in-memory seal shares when available.
-                            // VRF proofs are not stored on-chain; only applies to live validation.
-                            if (g_seal_manager && g_hmp_privilege) {
+                            // B-02 (v6/HMP_REARM): VRF proofs are now committed
+                            // on-chain (cbTx.vSealSignerVRFProofs, index-parallel to
+                            // vSealSigners). Strictly verify each is a valid BLS
+                            // signature by its signer over the canonical VRF input for
+                            // the sealed block -- deterministic from the header chain,
+                            // so a bad proof is a hard rejection. The committee
+                            // SELECTION threshold is applied later in FilterSealSigners
+                            // (filter, not reject). Pre-rearm keeps the legacy behaviour
+                            // (VRF only re-verifiable against the in-memory seal cache).
+                            if (hmpConsensus.IsHMPRearmActive(pindex->nHeight) &&
+                                cbTx.nVersion >= CCbTx::Version::HMP_REARM) {
+                                if (cbTx.vSealSignerVRFProofs.size() != sealSignerPubKeys.size()) {
+                                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-seal-vrf-parity");
+                                }
+                                // Canonical VRF input: the sealed block's own hash + its
+                                // pprev hash (prevSealHash; nPrevSealHashFixHeight is far
+                                // below nHMPRearmHeight, so this form is unconditional).
+                                const CBlockIndex* pSealed = pindex->GetAncestor(pindex->nHeight - hmpConsensus.nHMPSealTrailingDepth);
+                                const uint256 vrfPrevSealHash = (pSealed && pSealed->pprev) ? pSealed->pprev->GetBlockHash() : uint256();
+                                for (size_t i = 0; i < sealSignerPubKeys.size(); i++) {
+                                    if (!VerifyVRF(sealSignerPubKeys[i], cbTx.sealBlockHash, vrfPrevSealHash, cbTx.vSealSignerVRFProofs[i])) {
+                                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-seal-vrf");
+                                    }
+                                }
+                            } else if (g_seal_manager && g_hmp_privilege) {
                                 auto cachedSeal = g_seal_manager->GetSeal(cbTx.sealBlockHash);
                                 if (!cachedSeal) {
                                     // No cached seal, can't re-verify VRF (IBD/catch-up). Warn only.
@@ -3323,9 +3412,13 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-seal-signers-no-seal");
                     }
 
-                    // Strip uncommitted + unprivileged signers from seal.
+                    // Strip uncommitted + unprivileged (+ post-rearm, VRF-unselected) signers.
+                    std::vector<CBLSSignature> sealVrfProofs;
+                    if (cbTx.nVersion >= CCbTx::Version::HMP_REARM) sealVrfProofs = cbTx.vSealSignerVRFProofs;
                     FilterSealSigners(sealSignerPubKeys, sealSignerAlgos,
+                                      (cbTx.nVersion >= CCbTx::Version::HMP_REARM) ? &sealVrfProofs : nullptr,
                                       g_hmp_commitments.get(), g_hmp_privilege.get(),
+                                      hmpConsensus,
                                       pindex->nHeight, hmpConsensus.nHMPSealTrailingDepth,
                                       pindex, "ConnectBlock");
 
@@ -3335,6 +3428,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                         deferredHMP.fDoPrivilege = true;
                         deferredHMP.nPrivHeight = pindex->nHeight;
                         deferredHMP.nPrivAlgo = pindex->GetAlgo();
+                        deferredHMP.nPrivSealedAlgo = SealedAlgoOf(pindex, cbTx, hmpConsensus);
                         deferredHMP.privMinerIdentity = cbTx.minerIdentity;
                         if (hmpConsensus.IsDeterministicSealActive(pindex->nHeight)) {
                             // Credit the window from the raw on-chain signers so the
@@ -3398,6 +3492,43 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                             }
                         }
 
+                        if (hmpConsensus.IsHMPRearmActive(pindex->nHeight)) {
+                            // ===== v1.3.2 §1/§2 seal-weight ladder (locked constants) =====
+                            // Evaluated from PARENT tracker state (this block's fold is
+                            // deferred), so all nodes read the same arming decision.
+                            //   unsealed block   : armed ? 0.667x floor : 1.0x
+                            //   1-signer seal    : 1.0x (a seal, so never below the floor;
+                            //                      too thin for a bonus)
+                            //   >=2-signer seal  : bonus capped at 1.5x (armed) / 1.2x
+                            //                      (pre-arming, so no early lever),
+                            //                      x0.1 ONLY for the provable mannequin-
+                            //                      fraud case. Elder-absence penalties are
+                            //                      gone: presence over the on-chain
+                            //                      committee is identically 100%.
+                            // Monotone: a valid seal never weighs less than no seal
+                            // (mannequin fraud is the deliberate, provable exception).
+                            const bool fArmed = g_hmp_privilege && g_hmp_privilege->IsPenaltyArmed(nSealedAlgo);
+                            if (sealSignerPubKeys.empty()) {
+                                pindex->nSealWeight = fArmed ? 6667 : 10000;
+                            } else if (sealSignerPubKeys.size() < 2) {
+                                pindex->nSealWeight = 10000;
+                            } else {
+                                uint64_t base = ComputeSealMultiplier(sealSignerPubKeys, sealSignerAlgos,
+                                                                      nSealedAlgo, g_hmp_privilege.get(), pindex);
+                                base = std::min(base, fArmed ? uint64_t{15000} : uint64_t{12000});
+                                // G4-7: evaluate against the RAW on-chain signer set
+                                // (cbTx.vSealSigners), NOT the filtered set -- a mannequin
+                                // is by definition unknown-tier and FilterSealSigners has
+                                // already stripped those, so passing the filtered set would
+                                // make this penalty unreachable. The BLS aggregate was
+                                // verified over the raw set, so every raw signer really signed.
+                                const uint64_t mq = EvaluateMannequinPenalty(cbTx.vSealSigners, g_hmp_privilege.get());
+                                pindex->nSealWeight = (mq < 10000) ? (base * mq / 10000) : base;
+                            }
+                            LogPrint(BCLog::NET, "HMP: rearm weight h=%d sealedAlgo=%d armed=%d signers=%zu -> %u\n",
+                                     pindex->nHeight, nSealedAlgo, fArmed ? 1 : 0, sealSignerPubKeys.size(),
+                                     static_cast<unsigned>(pindex->nSealWeight));
+                        } else {
                         // Require minimum signers for positive seal weight bonus.
                         // In Stage 4, single-signer blocks still receive negative proof
                         // evaluation below; they only bypass the positive multiplier here.
@@ -3421,6 +3552,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                             uint64_t sw = std::min(pindex->nSealWeight, uint64_t{20000});
                             pindex->nSealWeight = sw * penalty / 10000;
                         }
+                        } // pre-rearm ladder (byte-identical to v1.3.1)
                     }
 
                     // Remove from candidates before mutating sort key to avoid std::set UB.
@@ -3902,7 +4034,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             g_hmp_privilege->BlockConnected(deferredHMP.nPrivHeight, deferredHMP.nPrivAlgo,
                                             deferredHMP.privMinerIdentity,
                                             deferredHMP.privSigners,
-                                            deferredHMP.privSignerAlgos);
+                                            deferredHMP.privSignerAlgos,
+                                            deferredHMP.nPrivSealedAlgo);
         }
         // The trackers now reflect this block; record it so the next connect can
         // tell an in-order extension from a post-reorg jump. VerifyDB (fVerifyOnly)
@@ -6128,6 +6261,7 @@ bool CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
     int maxLookback = std::max({
         consensus.nHMPDominanceCatchMaxLookback + consensus.nHMPPrivilegeWindow,
         consensus.nHMPPrivilegeWindow + consensus.nHMPWarmupBlocks,
+        CHMPPrivilegeTracker::SEAL_LONG_WINDOW, // v1.3.2 §1 arming HOLD lookback (400)
         static_cast<int>(consensus.nHMPCommitmentOffset) * 2
     });
 
@@ -6187,8 +6321,17 @@ bool CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
                         filteredSigners = cbTxOpt->vSealSigners;
                         filteredAlgos = cbTxOpt->vSealSignerAlgos;
 
+                        // B-02: carry the on-chain VRF proofs so the committee filter
+                        // applies. FilterSealSigners is height-gated internally, so a
+                        // pre-rearm (v5) block in the rebuild window passes nullptr and
+                        // is evaluated under the old rules -- the tri-path bit-identity
+                        // the rebuild depends on.
+                        std::vector<CBLSSignature> filteredVrfProofs;
+                        if (cbTxOpt->nVersion >= CCbTx::Version::HMP_REARM) filteredVrfProofs = cbTxOpt->vSealSignerVRFProofs;
                         FilterSealSigners(filteredSigners, filteredAlgos,
+                                          (cbTxOpt->nVersion >= CCbTx::Version::HMP_REARM) ? &filteredVrfProofs : nullptr,
                                           g_hmp_commitments.get(), g_hmp_privilege.get(),
+                                          consensus,
                                           height, consensus.nHMPSealTrailingDepth,
                                           pindex, "RebuildHMPState");
                     }
@@ -6204,10 +6347,12 @@ bool CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
                                 cbTxOpt->minerIdentity, noSigners);
                         } else if (consensus.IsDeterministicSealActive(height)) {
                             g_hmp_privilege->BlockConnected(height, pindex->GetAlgo(),
-                                cbTxOpt->minerIdentity, cbTxOpt->vSealSigners, cbTxOpt->vSealSignerAlgos);
+                                cbTxOpt->minerIdentity, cbTxOpt->vSealSigners, cbTxOpt->vSealSignerAlgos,
+                                SealedAlgoOf(pindex, *cbTxOpt, consensus));
                         } else {
                             g_hmp_privilege->BlockConnected(height, pindex->GetAlgo(),
-                                cbTxOpt->minerIdentity, filteredSigners, filteredAlgos);
+                                cbTxOpt->minerIdentity, filteredSigners, filteredAlgos,
+                                SealedAlgoOf(pindex, *cbTxOpt, consensus));
                         }
                     }
 
@@ -6579,9 +6724,13 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
                         }
                     }
 
-                    // Strip uncommitted + unprivileged signers from seal.
+                    // Strip uncommitted + unprivileged (+ post-rearm VRF-unselected) signers.
+                    std::vector<CBLSSignature> filteredVrfProofs;
+                    if (cbTxOpt->nVersion >= CCbTx::Version::HMP_REARM) filteredVrfProofs = cbTxOpt->vSealSignerVRFProofs;
                     FilterSealSigners(filteredSigners, filteredAlgos,
+                                      (cbTxOpt->nVersion >= CCbTx::Version::HMP_REARM) ? &filteredVrfProofs : nullptr,
                                       g_hmp_commitments.get(), g_hmp_privilege.get(),
+                                      hmpConsensus,
                                       pindex->nHeight, hmpConsensus.nHMPSealTrailingDepth,
                                       pindex, "RollforwardBlock");
 
@@ -6596,10 +6745,12 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
                                 cbTxOpt->minerIdentity, noSigners);
                         } else if (hmpConsensus.IsDeterministicSealActive(pindex->nHeight)) {
                             g_hmp_privilege->BlockConnected(pindex->nHeight, pindex->GetAlgo(),
-                                cbTxOpt->minerIdentity, cbTxOpt->vSealSigners, cbTxOpt->vSealSignerAlgos);
+                                cbTxOpt->minerIdentity, cbTxOpt->vSealSigners, cbTxOpt->vSealSignerAlgos,
+                                SealedAlgoOf(pindex, *cbTxOpt, hmpConsensus));
                         } else {
                             g_hmp_privilege->BlockConnected(pindex->nHeight, pindex->GetAlgo(),
-                                cbTxOpt->minerIdentity, filteredSigners, filteredAlgos);
+                                cbTxOpt->minerIdentity, filteredSigners, filteredAlgos,
+                                SealedAlgoOf(pindex, *cbTxOpt, hmpConsensus));
                         }
                     }
 

@@ -37,6 +37,7 @@ public:
         CLSIG_AND_BALANCE = 3,
         HMP_SEAL = 4,
         HMP_COMMITMENT = 5,
+        HMP_REARM = 6,
         UNKNOWN,
     };
 
@@ -60,6 +61,19 @@ public:
     // HMP_COMMITMENT (v5) fields: Phase 1 pubkey commitments
     std::vector<CBLSPublicKey> vCommitments; // max 16 per block = 768 bytes
 
+    // HMP_REARM (v6) fields: on-chain proofs that make the seal-weight economics
+    // verifiable and unforgeable (see the v1.3.2 design).
+    //   B-02: per-seal-signer VRF proofs, index-parallel to vSealSigners. Lets
+    //         every validator recompute the VRF committee for the block's seal and
+    //         count only genuinely-selected signers toward weight/presence.
+    //   B-03: per-commitment self-signatures, index-parallel to vCommitments.
+    //         Proves the committer controls the pubkey it registers.
+    //   Signed miner identity: signature by minerIdentity over block-binding data,
+    //         so a miner cannot inflate another key's blocks_solved (Q3).
+    std::vector<CBLSSignature> vSealSignerVRFProofs; // parallel to vSealSigners, <= MAX_SEAL_SIGNERS
+    std::vector<CBLSSignature> vCommitmentSigs;      // parallel to vCommitments, <= 16
+    CBLSSignature minerIdentitySig;                  // 96 bytes, sig by minerIdentity
+
     SERIALIZE_METHODS(CCbTx, obj)
     {
         READWRITE(obj.nVersion, obj.nHeight, obj.merkleRootMNList);
@@ -78,12 +92,25 @@ public:
                     READWRITE(LIMITED_VECTOR(obj.vSealSignerAlgos, MAX_SEAL_SIGNERS));
                     if (obj.nVersion >= Version::HMP_COMMITMENT) {
                         READWRITE(LIMITED_VECTOR(obj.vCommitments, 16));
+                        if (obj.nVersion >= Version::HMP_REARM) {
+                            READWRITE(LIMITED_VECTOR(obj.vSealSignerVRFProofs, MAX_SEAL_SIGNERS));
+                            READWRITE(LIMITED_VECTOR(obj.vCommitmentSigs, 16));
+                            READWRITE(obj.minerIdentitySig);
+                        }
                     }
                 }
             }
         }
 
     }
+
+    /** v6 (HMP_REARM): message the miner signs with minerIdentity to prove it
+     *  controls that key. Binds height + parent + the coinbase payout script: a
+     *  copied (identity, sig) pair only validates in a block that pays the honest
+     *  miner, so nobody can credit blocks_solved to a key they don't control (Q3).
+     *  Shared by the miner (node/miner.cpp) and ConnectBlock; never diverge them. */
+    static uint256 MinerIdentitySignatureHash(int32_t nHeight, const uint256& hashPrevBlock,
+                                              const CScript& payoutScript);
 
     [[nodiscard]] static RPCResult GetJsonHelp(const std::string& key, bool optional);
     std::string ToString() const;

@@ -189,7 +189,18 @@ static void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const std::
             // The idea is to immediately ban a MN when it fails 2 DKG sessions with only a few blocks in-between
             // If there were enough blocks between failures, the MN has a chance to recover as he reduces his penalty by 1 for every block
             // If it however fails 3 times in the timespan of a single payment cycle, it should definitely get banned
-            mnList.PoSePunish(members[i]->proTxHash, mnList.CalcPenalty(66), debugLogs);
+            //
+            // v1.3.2 (>= nHMPRearmHeight): recalibrate 66 -> 33. Dash's 66% is
+            // tuned for a ~thousands-MN network; on Kerrigan's small set
+            // (maxPenalty = max(100, mnCount) ~ 100 at ~80 MNs) 66 bans after
+            // two missed DKGs inside ~66 blocks, which mass-punishes members
+            // that were merely dropped from a burst-fractured commitment
+            // rather than genuinely absent. 33 gives ~three strikes and slows
+            // the ban cadence to let honest members recover; the phase-skip
+            // liveness fix removes most spurious drops in the first place.
+            const int penaltyPct =
+                Params().GetConsensus().IsHMPRearmActive(mnList.GetHeight()) ? 33 : 66;
+            mnList.PoSePunish(members[i]->proTxHash, mnList.CalcPenalty(penaltyPct), debugLogs);
         }
     }
 }
