@@ -192,16 +192,13 @@ bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
         return true;
     }
 
-    if (m_selfcheck_strict) {
-        m_selfcheck = SelfCheckResult::FAILED;
-        return false;
-    }
-
     // A failed self-connect only proves that WE cannot reach our own external address from behind
     // our own router (no NAT hairpinning), which says nothing about reachability from the internet.
     // Refusing to run keeps the masternode out of every DKG round and gets it PoSe-banned for a
-    // router quirk, so continue and surface a warning instead.
-    m_selfcheck = SelfCheckResult::STRICT_OFF;
+    // router quirk, so continue and surface a warning instead. The diagnosis is the same in both
+    // modes: -masternodeselfcheck only decides whether a failure at STARTUP is fatal, and a running
+    // masternode is never demoted over it, so the warning has to be set either way or a strict-mode
+    // operator would see selfCheck=failed with nothing explaining it.
     m_warning = strprintf("Could not connect to own address %s; continuing. Verify that port %d is reachable "
                           "from the internet, or the masternode will be PoSe-punished.",
                           m_service.ToStringAddrPort(), m_service.GetPort());
@@ -209,6 +206,12 @@ bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
         m_warning_log_time = now;
         LogPrintf("CActiveMasternodeManager -- WARNING: %s\n", m_warning);
     }
+
+    if (m_selfcheck_strict) {
+        m_selfcheck = SelfCheckResult::FAILED;
+        return false;
+    }
+    m_selfcheck = SelfCheckResult::STRICT_OFF;
     return true;
 }
 
