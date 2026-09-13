@@ -109,6 +109,14 @@ build_linux() {
     export CXXFLAGS="${CXXFLAGS:-} $remap"
     export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$SRCDIR=/build --remap-path-prefix=$HOME/.cargo=/cargo"
 
+    # aarch64 cross-links leak ~135k internal C++/Rust symbols into .dynsym
+    # (strip cannot remove dynamic symbols): 2.5x larger binaries for nothing.
+    # Localize every static-archive symbol on that target. x86_64 keeps its
+    # existing export set on purpose (validated release hash discipline).
+    if [ "$host" = "aarch64-linux-gnu" ]; then
+        export LDFLAGS="${LDFLAGS:-} -Wl,--exclude-libs,ALL"
+    fi
+
     # BDB (legacy single-file wallet.dat) lives under depends/. Pick it up via
     # the env vars the autoconf BDB probe expects, so --with-incompatible-bdb
     # finds it without falling back to the host BDB (which would not exist on a
