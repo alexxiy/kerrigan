@@ -113,8 +113,11 @@ build_linux() {
     # (strip cannot remove dynamic symbols): 2.5x larger binaries for nothing.
     # Localize every static-archive symbol on that target. x86_64 keeps its
     # existing export set on purpose (validated release hash discipline).
+    # Deliberately NOT exported: build_windows and any later build_linux run in this same
+    # shell, and --exclude-libs,ALL on a mingw link changes what the DLLs export.
+    local target_ldflags=""
     if [ "$host" = "aarch64-linux-gnu" ]; then
-        export LDFLAGS="${LDFLAGS:-} -Wl,--exclude-libs,ALL"
+        target_ldflags="-Wl,--exclude-libs,ALL"
     fi
 
     # BDB (legacy single-file wallet.dat) lives under depends/. Pick it up via
@@ -124,7 +127,8 @@ build_linux() {
     export BDB_LIBS="-L$prefix/lib -ldb_cxx-4.8"
     export BDB_CFLAGS="-I$prefix/include"
 
-    CONFIG_SITE="$prefix/share/config.site" ./configure \
+    CONFIG_SITE="$prefix/share/config.site" \
+    LDFLAGS="${LDFLAGS:-} $target_ldflags" ./configure \
         --prefix="$prefix" \
         --disable-tests --disable-bench \
         --disable-online-rust \
