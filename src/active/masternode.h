@@ -82,6 +82,8 @@ private:
     std::string m_warning GUARDED_BY(cs);
     int64_t m_warning_log_time GUARDED_BY(cs){0};
     SelfCheckResult m_selfcheck GUARDED_BY(cs){SelfCheckResult::SKIPPED};
+    // Bumped whenever our identity changes, so a probe queued for the old one is discarded.
+    uint64_t m_selfcheck_generation GUARDED_BY(cs){0};
     // Height of the last probe, -1 when we have not probed since becoming READY.
     int m_selfcheck_height GUARDED_BY(cs){-1};
     /** A probe is already queued or in flight, so do not queue a second one behind it. */
@@ -126,7 +128,7 @@ private:
     //! Probe our own advertised address. Returns false only when strict mode turns a failure fatal.
     bool ApplySelfCheckResult(bool connected) EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool RunSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(cs);
-    void RunScheduledSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    void RunScheduledSelfCheck(uint64_t generation) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     //! Re-probe if enough blocks have passed since the last probe. Never changes m_state.
     void MaybeRunSelfCheck(int nHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool GetLocalAddress(CService& addrRet) EXCLUSIVE_LOCKS_REQUIRED(cs);

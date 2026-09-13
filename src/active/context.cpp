@@ -25,6 +25,7 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <vector>
 #include <validationinterface.h>
 
 ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman, CConnman& connman,
@@ -144,8 +145,9 @@ void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlock
 
     for (const auto& outcome : outcomes) {
         auto& cached = m_dkg_outcomes[{outcome.llmqType, outcome.quorumIndex}];
-        // Same commitment as last time, or an older one because a reorg moved us back: say nothing.
-        if (cached.minedBlockHash == outcome.minedBlockHash || outcome.height <= cached.height) continue;
+        // Only the very same commitment is old news. A different one at the same height is a reorg
+        // that replaced the block we reported, and its validMembers can differ from what we said.
+        if (cached.minedBlockHash == outcome.minedBlockHash || outcome.height < cached.height) continue;
         cached = outcome;
         if (priming) continue;
 
@@ -160,14 +162,24 @@ void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlock
 
 std::optional<llmq::DkgOutcome> ActiveContext::GetLastDkgOutcome() const
 {
-    LOCK(m_dkg_outcomes_mutex);
-    const llmq::DkgOutcome* newest{nullptr};
-    for (const auto& [key, outcome] : m_dkg_outcomes) {
-        if (outcome.height < 0) continue;
-        if (newest == nullptr || outcome.height > newest->height) {
-            newest = &outcome;
+    std::vector<llmq::DkgOutcome> candidates;
+    {
+        LOCK(m_dkg_outcomes_mutex);
+        for (const auto& [key, outcome] : m_dkg_outcomes) {
+            if (outcome.height >= 0) candidates.emplace_back(outcome);
         }
     }
-    if (newest == nullptr) return std::nullopt;
-    return *newest;
+    // Newest first. Snapshotted before taking cs_main so the two locks are never held together.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const llmq::DkgOutcome& a, const llmq::DkgOutcome& b) { return a.height > b.height; });
+
+    LOCK(::cs_main);
+    for (const auto& outcome : candidates) {
+        // A reorg can orphan the block an outcome came from long before a new commitment replaces
+        // the cache entry. Reporting it would describe a quorum this chain no longer has, so skip
+        // it and fall back to the newest outcome that is still on the active chain.
+        const CBlockIndex* pindex{m_chainman.m_blockman.LookupBlockIndex(outcome.minedBlockHash)};
+        if (pindex != nullptr && m_chainman.ActiveChain().Contains(pindex)) return outcome;
+    }
+    return std::nullopt;
 }

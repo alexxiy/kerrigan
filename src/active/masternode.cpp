@@ -276,7 +276,7 @@ bool CActiveMasternodeManager::RunSelfCheck()
     return ApplySelfCheckResult(ProbeSelfConnect(m_service, MASTERNODE_SELF_CHECK_TIMEOUT));
 }
 
-void CActiveMasternodeManager::RunScheduledSelfCheck()
+void CActiveMasternodeManager::RunScheduledSelfCheck(uint64_t generation)
 {
     CService service;
     {
@@ -294,7 +294,9 @@ void CActiveMasternodeManager::RunScheduledSelfCheck()
     LOCK(cs);
     m_selfcheck_queued = false;
     // The state can have moved on while we were probing (MN removed, IP changed). Only a still
-    // READY masternode with the same address has anything to learn from this result.
+    // READY masternode with the same address and the same identity has anything to learn from
+    // this result; a reset in the meantime bumps the generation and voids it.
+    if (m_selfcheck_generation != generation) return;
     if (m_state != MasternodeState::READY || m_service != service) return;
     // Deliberately ignore the return value: a periodic probe never demotes a running masternode,
     // not even with -masternodeselfcheck=1. Losing hairpinning mid-flight must not cost quorums.
@@ -303,6 +305,7 @@ void CActiveMasternodeManager::RunScheduledSelfCheck()
 
 void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
 {
+    uint64_t generation{0};
     {
         LOCK(cs);
         if (m_state != MasternodeState::READY) return;
@@ -316,6 +319,7 @@ void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
             return;
         }
         m_selfcheck_queued = true;
+        generation = m_selfcheck_generation;
     }
 
     // The probe at startup is only a snapshot: port forwards die long afterwards (router reboot,
@@ -328,10 +332,11 @@ void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
     // to MASTERNODE_SELF_CHECK_TIMEOUT. The scheduler is stopped long before this object is
     // destroyed, so capturing this is safe.
     if (CScheduler* scheduler{m_scheduler.load(std::memory_order_acquire)}) {
-        scheduler->scheduleFromNow([this] { RunScheduledSelfCheck(); }, std::chrono::milliseconds{0});
+        scheduler->scheduleFromNow([this, generation] { RunScheduledSelfCheck(generation); },
+                                   std::chrono::milliseconds{0});
     } else {
         // No scheduler (unit tests): behave exactly as before.
-        RunScheduledSelfCheck();
+        RunScheduledSelfCheck(generation);
     }
 }
 
@@ -364,6 +369,12 @@ void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, con
             m_state = state;
             m_protx_hash = uint256();
             m_outpoint.SetNull();
+            // Whatever we knew about reachability belonged to the identity we just lost. Clear it
+            // and void any probe still in flight for it; InitInternal below establishes it afresh.
+            ++m_selfcheck_generation;
+            m_selfcheck = SelfCheckResult::SKIPPED;
+            m_selfcheck_height = -1;
+            m_warning.clear();
             // MN might have reappeared in same block with a new ProTx
             InitInternal(pindexNew);
         };

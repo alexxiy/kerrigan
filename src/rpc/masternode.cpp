@@ -551,7 +551,10 @@ static RPCHelpMan masternode_status()
                                                     "which is a hard error), \"strict-off\" (probe failed but we keep "
                                                     "running) or \"skipped\" (chain does not require a routable IP)"},
                 {RPCResult::Type::OBJ, "lastDkg", "Newest mined commitment of a quorum we were a member of. All keys are "
-                                                  "present; they are null when we were not a member of any recent quorum",
+                                                  "present; they are null when we were not a member of any recent quorum. "
+                                                  "Built from commitments seen since this node started, so the first "
+                                                  "commitment after a restart may not be reported, and an outcome whose "
+                                                  "block has left the active chain is not reported at all",
                 {
                     {RPCResult::Type::STR, "llmqType", "LLMQ type name, or null"},
                     {RPCResult::Type::STR_HEX, "quorumHash", "Quorum base block hash, or null"},
