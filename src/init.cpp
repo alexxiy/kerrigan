@@ -993,6 +993,7 @@ void SetupServerArgs(ArgsManager& argsman)
     SetupChainParamsOptions(argsman);
 
     argsman.AddArg("-llmq-data-recovery=<n>", strprintf("Enable automated quorum data recovery (default: %u)", llmq::DEFAULT_ENABLE_QUORUM_DATA_RECOVERY), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
+    argsman.AddArg("-llmqdkgphasedwell=<n>", strprintf("Keep at least <n> seconds of wall clock between two consecutive DKG phase start handlers of the same round, so that messages from slower members can still arrive before they are judged. 0 disables it (default: %u, 0 on regtest, maximum: %u)", llmq::DEFAULT_DKG_PHASE_DWELL, llmq::MAX_DKG_PHASE_DWELL), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-llmq-qvvec-sync=<quorum_name>:<mode>", strprintf("Defines from which LLMQ type the masternode should sync quorum verification vectors. Can be used multiple times with different LLMQ types. <mode>: %d (sync always from all quorums of the type defined by <quorum_name>), %d (sync from all quorums of the type defined by <quorum_name> if a member of any of the quorums)", (int32_t)llmq::QvvecSyncMode::Always, (int32_t)llmq::QvvecSyncMode::OnlyIfTypeMember), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-masternodeblsprivkey=<hex>", "Set the masternode BLS private key and enable the client to act as a masternode", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::MASTERNODE);
     argsman.AddArg("-deprecated-platform-user=<user>", "Set the username for the \"platform user\", a restricted user intended to be used by Kerrigan Platform, to the specified username.", ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
@@ -3400,6 +3401,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     const bool quorums_recovery = args.GetBoolArg("-llmq-data-recovery", llmq::DEFAULT_ENABLE_QUORUM_DATA_RECOVERY);
     const bool quorums_watch = args.GetBoolArg("-watchquorums", llmq::DEFAULT_WATCH_QUORUMS);
+    // Networks that mine on demand (regtest) have no block cadence to be raced by, and a dwell
+    // there would only slow every functional test down, so default it off for them.
+    const int dkg_phase_dwell = std::clamp<int>(args.GetIntArg("-llmqdkgphasedwell",
+                                                               Params().MineBlocksOnDemand()
+                                                                   ? 0
+                                                                   : llmq::DEFAULT_DKG_PHASE_DWELL),
+                                                0, llmq::MAX_DKG_PHASE_DWELL);
     const llmq::QvvecSyncModeMap sync_map{llmq::GetEnabledQuorumVvecSyncEntries(args)};
     const util::DbWrapperParams kerrigan_db_params{.path = args.GetDataDirNet(), .memory = false, .wipe = (fReindex || fReindexChainState)};
     if (const auto operator_sk_str = args.GetArg("-masternodeblsprivkey", ""); !operator_sk_str.empty()) {
@@ -3411,7 +3419,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         node.active_ctx = std::make_unique<ActiveContext>(*node.llmq_ctx->bls_worker, chainman, *node.connman, *node.dmnman, *node.govman, *node.mn_metaman,
                                                           *node.sporkman, *node.chainlocks, *node.mempool, *node.clhandler, *node.llmq_ctx->isman,
                                                           *node.llmq_ctx->quorum_block_processor, *node.llmq_ctx->qman, *node.llmq_ctx->qsnapman, *node.llmq_ctx->sigman,
-                                                          *node.mn_sync, operator_sk, sync_map, kerrigan_db_params, quorums_recovery, quorums_watch);
+                                                          *node.mn_sync, operator_sk, sync_map, kerrigan_db_params, quorums_recovery, quorums_watch,
+                                                          dkg_phase_dwell);
         RegisterValidationInterface(node.active_ctx.get());
     } else if (quorums_watch) {
         node.observer_ctx = std::make_unique<llmq::ObserverContext>(*node.llmq_ctx->bls_worker, *node.connman, *node.dmnman, *node.mn_metaman, *node.mn_sync,

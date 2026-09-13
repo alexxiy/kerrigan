@@ -54,6 +54,8 @@ private:
     const ChainstateManager& m_chainman;
     const CSporkManager& m_sporkman;
     const bool m_quorums_watch{false};
+    //! -llmqdkgphasedwell, minimum seconds of wall clock between two phase start handlers
+    const int m_dkg_phase_dwell{0};
     const int quorumIndex;
 
 private:
@@ -62,6 +64,10 @@ private:
     std::string m_thread_name;
     std::thread phaseHandlerThread;
     std::unique_ptr<CDKGSession> curSession{nullptr};
+
+    //! Wall clock (ms since epoch) at which the last phase start handler of the current round
+    //! ran, 0 when no start handler ran yet for this round.
+    std::atomic<int64_t> m_phase_start_ms{0};
 
     mutable Mutex cs_phase_qhash;
     QuorumPhase phase GUARDED_BY(cs_phase_qhash){QuorumPhase::Idle};
@@ -76,7 +82,7 @@ public:
                             llmq::CQuorumBlockProcessor& qblockman, llmq::CQuorumSnapshotManager& qsnapman,
                             const CActiveMasternodeManager& mn_activeman, const ChainstateManager& chainman,
                             const CSporkManager& sporkman, const Consensus::LLMQParams& llmq_params, bool quorums_watch,
-                            int quorums_idx);
+                            int dkg_phase_dwell, int quorums_idx);
     ~ActiveDKGSessionHandler();
 
 public:
@@ -107,6 +113,8 @@ private:
     void WaitForNewQuorum(const uint256& oldQuorumHash) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor,
                           const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void WaitPhaseDwell(const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash,
                      double randomSleepFactor, const StartPhaseFunc& startPhaseFunc,
                      const WhileWaitFunc& runWhileWaiting) EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);

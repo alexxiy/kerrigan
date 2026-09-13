@@ -35,6 +35,10 @@ static const int8_t DEFAULT_BLSCHECK_THREADS{0};
 static constexpr bool DEFAULT_ENABLE_QUORUM_DATA_RECOVERY{true};
 /** -watchquorums default, if true, we will connect to all new quorums and watch their communication */
 static constexpr bool DEFAULT_WATCH_QUORUMS{false};
+/** -llmqdkgphasedwell default (seconds), 0 on networks that mine blocks on demand */
+static constexpr int DEFAULT_DKG_PHASE_DWELL{30};
+/** -llmqdkgphasedwell upper bound (seconds) */
+static constexpr int MAX_DKG_PHASE_DWELL{600};
 
 bool IsAllMembersConnectedEnabled(const Consensus::LLMQType llmqType, const CSporkManager& sporkman);
 bool IsQuorumPoseEnabled(const Consensus::LLMQType llmqType, const CSporkManager& sporkman);

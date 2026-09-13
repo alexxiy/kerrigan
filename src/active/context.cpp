@@ -32,7 +32,7 @@ ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman
                              llmq::CQuorumSnapshotManager& qsnapman, llmq::CSigningManager& sigman,
                              const CMasternodeSync& mn_sync, const CBLSSecretKey& operator_sk,
                              const llmq::QvvecSyncModeMap& sync_map, const util::DbWrapperParams& db_params,
-                             bool quorums_recovery, bool quorums_watch) :
+                             bool quorums_recovery, bool quorums_watch, int dkg_phase_dwell) :
     m_isman{isman},
     m_qman{qman},
     nodeman{std::make_unique<CActiveMasternodeManager>(connman, dmnman, operator_sk)},
@@ -52,7 +52,8 @@ ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman
                                      int quorum_idx) -> std::unique_ptr<llmq::ActiveDKGSessionHandler> {
         return std::make_unique<llmq::ActiveDKGSessionHandler>(bls_worker, dmnman, mn_metaman, *dkgdbgman, *qdkgsman,
                                                                qblockman, qsnapman, *nodeman, chainman, sporkman,
-                                                               llmq_params, quorums_watch, quorum_idx);
+                                                               llmq_params, quorums_watch, dkg_phase_dwell,
+                                                               quorum_idx);
     });
     m_isman.ConnectSigner(is_signer.get());
     m_qman.ConnectManagers(qman_handler.get(), qdkgsman.get());
