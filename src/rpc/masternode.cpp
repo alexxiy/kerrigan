@@ -542,6 +542,7 @@ static RPCHelpMan masternode_status()
                 GetRpcResult("collateralIndex", /*optional=*/true),
                 CDeterministicMNState::GetJsonHelp(/*key=*/"dmnState", /*optional=*/true),
                 {RPCResult::Type::STR, "state", "Masternode state (e.g. READY, POSE_BANNED, WAITING_FOR_PROTX)"},
+                {RPCResult::Type::STR, "warning", "Non-fatal operator warning, empty string when there is none"},
             }
         },
         RPCExamples{""},
@@ -568,6 +569,7 @@ static RPCHelpMan masternode_status()
     // "status" removed in v1.1 -- was a human-friendly duplicate of "state".
     // Pool software and monitoring tools use "state" (machine-readable enum).
     mnObj.pushKV("state", mn_activeman.GetStateString());
+    mnObj.pushKV("warning", mn_activeman.GetWarning());
 
     return mnObj;
 },

@@ -32,10 +32,10 @@ ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman
                              llmq::CQuorumSnapshotManager& qsnapman, llmq::CSigningManager& sigman,
                              const CMasternodeSync& mn_sync, const CBLSSecretKey& operator_sk,
                              const llmq::QvvecSyncModeMap& sync_map, const util::DbWrapperParams& db_params,
-                             bool quorums_recovery, bool quorums_watch) :
+                             bool quorums_recovery, bool quorums_watch, bool selfcheck_strict) :
     m_isman{isman},
     m_qman{qman},
-    nodeman{std::make_unique<CActiveMasternodeManager>(connman, dmnman, operator_sk)},
+    nodeman{std::make_unique<CActiveMasternodeManager>(connman, dmnman, operator_sk, selfcheck_strict)},
     dkgdbgman{std::make_unique<llmq::CDKGDebugManager>()},
     qdkgsman{std::make_unique<llmq::CDKGSessionManager>(dmnman, qsnapman, chainman, sporkman, db_params, quorums_watch)},
     shareman{std::make_unique<llmq::CSigSharesManager>(connman, chainman, sigman, *nodeman, qman, sporkman)},
@@ -102,3 +102,4 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
     qdkgsman->UpdatedBlockTip(pindexNew, fInitialDownload);
     qman_handler->UpdatedBlockTip(pindexNew, fInitialDownload);
 }
+
