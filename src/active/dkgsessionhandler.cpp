@@ -20,6 +20,8 @@
 #include <util/time.h>
 #include <validation.h>
 
+#include <algorithm>
+
 namespace llmq {
 ActiveDKGSessionHandler::ActiveDKGSessionHandler(
     CBLSWorker& bls_worker, CDeterministicMNManager& dmnman, CMasternodeMetaMan& mn_metaman,
@@ -324,10 +326,12 @@ void ActiveDKGSessionHandler::SleepBeforePhase(QuorumPhase curPhase, const uint2
 // applied even when the chain has already jumped several phases ahead - that is exactly the
 // case it exists for. It is purely local scheduling: no change to block validity and nothing
 // different on the wire.
-void ActiveDKGSessionHandler::WaitPhaseDwell(const uint256& expectedQuorumHash,
+void ActiveDKGSessionHandler::WaitPhaseDwell(QuorumPhase curPhase, const uint256& expectedQuorumHash,
                                              const WhileWaitFunc& runWhileWaiting) const
 {
-    if (m_dkg_phase_dwell <= 0) {
+    if (m_dkg_phase_dwell <= 0 || !curSession->AreWeMember()) {
+        // A non-member judges nobody, so it has nothing to wait for and should not hold back
+        // its own (observer-only) progress.
         return;
     }
     const int64_t prev_start_ms{m_phase_start_ms.load()};
@@ -336,23 +340,53 @@ void ActiveDKGSessionHandler::WaitPhaseDwell(const uint256& expectedQuorumHash,
         // judged yet and delaying it would only make our own messages later for everybody.
         return;
     }
-    const int64_t end_time{prev_start_ms + int64_t{m_dkg_phase_dwell} * 1000};
 
-    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwelling up to %d ms before the next start handler\n", __func__, params.name, quorumIndex, end_time - TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()));
+    const int64_t spacing{Params().GetConsensus().nPowTargetSpacing};
+    const int64_t dwell_s{std::min({int64_t{m_dkg_phase_dwell}, int64_t{MAX_DKG_PHASE_DWELL},
+                                    int64_t{params.dkgPhaseBlocks} * spacing / 2})};
+    if (dwell_s <= 0) {
+        return;
+    }
 
-    while (TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now()) < end_time) {
+    // Budget the dwell against the mining window. Commit is the last start handler of the
+    // round, so the dwells still ahead of us must all fit before the window opens - a
+    // commitment that misses its window helps nobody, which is strictly worse than judging
+    // a little early.
+    const int remaining_dwells{ToUnderlying(QuorumPhase::Commit) - ToUnderlying(curPhase) + 1};
+    if (remaining_dwells <= 0) {
+        return;
+    }
+    const int64_t blocks_left{int64_t{curSession->BlockIndex()->nHeight} + params.dkgMiningWindowStart -
+                              currentHeight.load()};
+    const int64_t budget_ms{blocks_left > 0 ? blocks_left * spacing * 1000 : 0};
+    const int64_t planned_ms{std::min<int64_t>(dwell_s * 1000 * remaining_dwells, budget_ms)};
+    const int64_t this_dwell_ms{planned_ms / remaining_dwells};
+    if (this_dwell_ms <= 0) {
+        LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell skipped, mining window is too close (blocks_left=%d)\n", __func__, params.name, quorumIndex, blocks_left);
+        return;
+    }
+    const int64_t end_time{prev_start_ms + this_dwell_ms};
+
+    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwelling up to %d ms before the next start handler (curPhase=%d, remaining=%d)\n", __func__, params.name, quorumIndex, end_time - GetTime<std::chrono::milliseconds>().count(), ToUnderlying(curPhase), remaining_dwells);
+
+    while (GetTime<std::chrono::milliseconds>().count() < end_time) {
         if (stopRequested) {
             LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due to stop/shutdown requested\n", __func__, params.name, quorumIndex);
             throw AbortPhaseException();
         }
-        // Only a genuinely new round invalidates the dwell. A phase that has run ahead must
-        // NOT abort it, otherwise the burst we are protecting against would cancel the
-        // protection.
-        auto [_, _quorumHash] = GetPhaseAndQuorumHash();
-        if (_quorumHash != expectedQuorumHash) {
+        auto [p, qh] = GetPhaseAndQuorumHash();
+        if (qh != expectedQuorumHash) {
             LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due unexpected expectedQuorumHash change\n", __func__, params.name, quorumIndex);
             throw AbortPhaseException();
         }
+        if (ToUnderlying(p) < ToUnderlying(curPhase)) {
+            // Backward move within the same round (intra-window reorg), same rule as
+            // SleepBeforePhase: the session we were about to act on no longer exists.
+            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due backward phase change, phase=%d, curPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(p), ToUnderlying(curPhase));
+            throw AbortPhaseException();
+        }
+        // A phase that has run FORWARD must not abort the dwell, otherwise the burst we are
+        // protecting against would cancel the protection.
         if (!runWhileWaiting()) {
             UninterruptibleSleep(std::chrono::milliseconds{100});
         }
@@ -368,9 +402,12 @@ void ActiveDKGSessionHandler::HandlePhase(QuorumPhase curPhase, QuorumPhase next
     LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - starting, curPhase=%d, nextPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(curPhase), ToUnderlying(nextPhase));
 
     SleepBeforePhase(curPhase, expectedQuorumHash, randomSleepFactor, runWhileWaiting);
-    WaitPhaseDwell(expectedQuorumHash, runWhileWaiting);
+    WaitPhaseDwell(curPhase, expectedQuorumHash, runWhileWaiting);
+    // Stamp before running the handler, not after: the dwell measures the gap between the
+    // START of two handlers, and a handler that itself takes seconds (VerifyAndComplain on a
+    // 60-member quorum does real BLS work) would otherwise silently extend every later dwell.
+    m_phase_start_ms = GetTime<std::chrono::milliseconds>().count();
     startPhaseFunc();
-    m_phase_start_ms = TicksSinceEpoch<std::chrono::milliseconds>(SystemClock::now());
     WaitForNextPhase(curPhase, nextPhase, expectedQuorumHash, runWhileWaiting);
 
     LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - done, curPhase=%d, nextPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(curPhase), ToUnderlying(nextPhase));

@@ -37,7 +37,8 @@ static constexpr bool DEFAULT_ENABLE_QUORUM_DATA_RECOVERY{true};
 static constexpr bool DEFAULT_WATCH_QUORUMS{false};
 /** -llmqdkgphasedwell default (seconds), 0 on networks that mine blocks on demand */
 static constexpr int DEFAULT_DKG_PHASE_DWELL{30};
-/** -llmqdkgphasedwell upper bound (seconds) */
+/** -llmqdkgphasedwell upper bound (seconds). Reduced further at use to half a DKG phase,
+ *  which is the point past which a dwell would routinely outlive the phase it belongs to. */
 static constexpr int MAX_DKG_PHASE_DWELL{600};
 
 bool IsAllMembersConnectedEnabled(const Consensus::LLMQType llmqType, const CSporkManager& sporkman);

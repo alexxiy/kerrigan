@@ -3404,11 +3404,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     const bool quorums_watch = args.GetBoolArg("-watchquorums", llmq::DEFAULT_WATCH_QUORUMS);
     // Networks that mine on demand (regtest) have no block cadence to be raced by, and a dwell
     // there would only slow every functional test down, so default it off for them.
-    const int dkg_phase_dwell = std::clamp<int>(args.GetIntArg("-llmqdkgphasedwell",
-                                                               Params().MineBlocksOnDemand()
-                                                                   ? 0
-                                                                   : llmq::DEFAULT_DKG_PHASE_DWELL),
-                                                0, llmq::MAX_DKG_PHASE_DWELL);
+    // Clamp in int64 and narrow afterwards: -llmqdkgphasedwell=4294967296 must land on the
+    // maximum, not wrap through a 32-bit truncation into 0.
+    const int dkg_phase_dwell = static_cast<int>(
+        std::clamp<int64_t>(args.GetIntArg("-llmqdkgphasedwell",
+                                           Params().MineBlocksOnDemand() ? 0 : llmq::DEFAULT_DKG_PHASE_DWELL),
+                            0, llmq::MAX_DKG_PHASE_DWELL));
     const bool selfcheck_strict = args.GetBoolArg("-masternodeselfcheck", DEFAULT_MASTERNODE_SELF_CHECK);
     const llmq::QvvecSyncModeMap sync_map{llmq::GetEnabledQuorumVvecSyncEntries(args)};
     const util::DbWrapperParams kerrigan_db_params{.path = args.GetDataDirNet(), .memory = false, .wipe = (fReindex || fReindexChainState)};
