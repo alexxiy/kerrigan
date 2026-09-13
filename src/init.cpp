@@ -996,6 +996,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-llmqdkgphasedwell=<n>", strprintf("Keep at least <n> seconds of wall clock between two consecutive DKG phase start handlers of the same round, so that messages from slower members can still arrive before they are judged. 0 disables it (default: %u, 0 on regtest, maximum: %u)", llmq::DEFAULT_DKG_PHASE_DWELL, llmq::MAX_DKG_PHASE_DWELL), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-llmq-qvvec-sync=<quorum_name>:<mode>", strprintf("Defines from which LLMQ type the masternode should sync quorum verification vectors. Can be used multiple times with different LLMQ types. <mode>: %d (sync always from all quorums of the type defined by <quorum_name>), %d (sync from all quorums of the type defined by <quorum_name> if a member of any of the quorums)", (int32_t)llmq::QvvecSyncMode::Always, (int32_t)llmq::QvvecSyncMode::OnlyIfTypeMember), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-masternodeblsprivkey=<hex>", "Set the masternode BLS private key and enable the client to act as a masternode", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::MASTERNODE);
+    argsman.AddArg("-masternodeselfcheck=<0|1>", strprintf("Refuse to run as a masternode when we cannot connect to our own external address. Most routers cannot do NAT hairpinning, so this check fails for reasons that do not affect reachability from the internet; 0 reports it as a warning instead (default: %u)", DEFAULT_MASTERNODE_SELF_CHECK), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-deprecated-platform-user=<user>", "Set the username for the \"platform user\", a restricted user intended to be used by Kerrigan Platform, to the specified username.", ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
 
     argsman.AddArg("-acceptnonstdtxn", strprintf("Relay and mine \"non-standard\" transactions (%sdefault: %u)", "testnet/regtest only; ", !testnetChainParams->RequireStandard()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::NODE_RELAY);
@@ -3408,6 +3409,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                                                    ? 0
                                                                    : llmq::DEFAULT_DKG_PHASE_DWELL),
                                                 0, llmq::MAX_DKG_PHASE_DWELL);
+    const bool selfcheck_strict = args.GetBoolArg("-masternodeselfcheck", DEFAULT_MASTERNODE_SELF_CHECK);
     const llmq::QvvecSyncModeMap sync_map{llmq::GetEnabledQuorumVvecSyncEntries(args)};
     const util::DbWrapperParams kerrigan_db_params{.path = args.GetDataDirNet(), .memory = false, .wipe = (fReindex || fReindexChainState)};
     if (const auto operator_sk_str = args.GetArg("-masternodeblsprivkey", ""); !operator_sk_str.empty()) {
@@ -3420,7 +3422,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                                           *node.sporkman, *node.chainlocks, *node.mempool, *node.clhandler, *node.llmq_ctx->isman,
                                                           *node.llmq_ctx->quorum_block_processor, *node.llmq_ctx->qman, *node.llmq_ctx->qsnapman, *node.llmq_ctx->sigman,
                                                           *node.mn_sync, operator_sk, sync_map, kerrigan_db_params, quorums_recovery, quorums_watch,
-                                                          dkg_phase_dwell);
+                                                          dkg_phase_dwell, selfcheck_strict);
         RegisterValidationInterface(node.active_ctx.get());
     } else if (quorums_watch) {
         node.observer_ctx = std::make_unique<llmq::ObserverContext>(*node.llmq_ctx->bls_worker, *node.connman, *node.dmnman, *node.mn_metaman, *node.mn_sync,

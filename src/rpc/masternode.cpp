@@ -4,6 +4,7 @@
 
 #include <active/context.h>
 #include <active/masternode.h>
+#include <active/quorums.h>
 #include <evo/assetlocktx.h>
 #include <evo/chainhelper.h>
 #include <evo/deterministicmns.h>
@@ -17,6 +18,8 @@
 #include <hash.h>
 #include <index/txindex.h>
 #include <key_io.h>
+#include <llmq/blockprocessor.h>
+#include <llmq/context.h>
 #include <net.h>
 #include <netbase.h>
 #include <node/blockstorage.h>
@@ -542,6 +545,15 @@ static RPCHelpMan masternode_status()
                 GetRpcResult("collateralIndex", /*optional=*/true),
                 CDeterministicMNState::GetJsonHelp(/*key=*/"dmnState", /*optional=*/true),
                 {RPCResult::Type::STR, "state", "Masternode state (e.g. READY, POSE_BANNED, WAITING_FOR_PROTX)"},
+                {RPCResult::Type::STR, "warning", "Non-fatal operator warning, empty string when there is none"},
+                {RPCResult::Type::OBJ, "lastDkg", "Newest mined commitment of a quorum we are a member of, empty when there is none",
+                {
+                    {RPCResult::Type::STR, "llmqType", /*optional=*/true, "LLMQ type name"},
+                    {RPCResult::Type::STR_HEX, "quorumHash", /*optional=*/true, "Quorum base block hash"},
+                    {RPCResult::Type::NUM, "height", /*optional=*/true, "Height the commitment was mined at"},
+                    {RPCResult::Type::BOOL, "member", /*optional=*/true, "Whether we were a member of the quorum"},
+                    {RPCResult::Type::BOOL, "valid", /*optional=*/true, "Whether the commitment counted us as valid"},
+                }},
             }
         },
         RPCExamples{""},
@@ -568,6 +580,33 @@ static RPCHelpMan masternode_status()
     // "status" removed in v1.1 -- was a human-friendly duplicate of "state".
     // Pool software and monitoring tools use "state" (machine-readable enum).
     mnObj.pushKV("state", mn_activeman.GetStateString());
+    mnObj.pushKV("warning", mn_activeman.GetWarning());
+
+    // Report how the last DKG round we took part in actually ended. An operator otherwise has no
+    // way to notice repeated exclusions before the PoSe ban lands.
+    UniValue lastDkg(UniValue::VOBJ);
+    if (node.llmq_ctx != nullptr && node.dmnman != nullptr && node.chainman != nullptr) {
+        const CBlockIndex* pindex{WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Tip())};
+        const llmq::DkgOutcome* newest{nullptr};
+        const auto outcomes{llmq::GetRecentDkgOutcomes(mn_activeman.GetProTxHash(),
+                                                       *node.llmq_ctx->quorum_block_processor, *node.dmnman,
+                                                       *node.llmq_ctx->qsnapman, *node.chainman, pindex)};
+        for (const auto& outcome : outcomes) {
+            if (!outcome.member) continue;
+            if (newest == nullptr || outcome.height > newest->height) {
+                newest = &outcome;
+            }
+        }
+        if (newest != nullptr) {
+            const auto& llmq_params_opt = Params().GetLLMQ(newest->llmqType);
+            lastDkg.pushKV("llmqType", llmq_params_opt.has_value() ? std::string{llmq_params_opt->name} : "unknown");
+            lastDkg.pushKV("quorumHash", newest->quorumHash.ToString());
+            lastDkg.pushKV("height", newest->height);
+            lastDkg.pushKV("member", newest->member);
+            lastDkg.pushKV("valid", newest->valid);
+        }
+    }
+    mnObj.pushKV("lastDkg", lastDkg);
 
     return mnObj;
 },

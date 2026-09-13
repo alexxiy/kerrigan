@@ -12,6 +12,7 @@
 #include <netbase.h>
 #include <protocol.h>
 #include <util/check.h>
+#include <util/time.h>
 
 namespace {
 bool GetLocal(CService& addr, const CNetAddr* paddrPeer)
@@ -50,11 +51,12 @@ bool GetLocal(CService& addr, const CNetAddr* paddrPeer)
 } // anonymous namespace
 
 CActiveMasternodeManager::CActiveMasternodeManager(CConnman& connman, CDeterministicMNManager& dmnman,
-                                                   const CBLSSecretKey& sk) :
+                                                   const CBLSSecretKey& sk, bool selfcheck_strict) :
     m_connman{connman},
     m_dmnman{dmnman},
     m_operator_pk{sk.GetPublicKey()},
-    m_operator_sk{sk}
+    m_operator_sk{sk},
+    m_selfcheck_strict{selfcheck_strict}
 {
     assert(sk.IsValid()); /* We can assume pk is valid if sk is valid */
     LogPrintf("MASTERNODE:\n  blsPubKeyOperator legacy: %s\n  blsPubKeyOperator basic: %s\n",
@@ -161,10 +163,26 @@ void CActiveMasternodeManager::InitInternal(const CBlockIndex* pindex)
     bool fConnected{sock && sock->IsSelectable(/*is_select=*/::g_socket_events_mode == SocketEventsMode::Select)};
     sock = std::make_unique<Sock>(INVALID_SOCKET);
     if (!fConnected && Params().RequireRoutableExternalIP()) {
-        m_state = MasternodeState::SOME_ERROR;
-        m_error = "Could not connect to " + m_service.ToStringAddrPort();
-        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", m_error);
-        return;
+        if (m_selfcheck_strict) {
+            m_state = MasternodeState::SOME_ERROR;
+            m_error = "Could not connect to " + m_service.ToStringAddrPort();
+            LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", m_error);
+            return;
+        }
+        // A failed self-connect only proves that WE cannot reach our own external address from
+        // behind our own router (no NAT hairpinning), which says nothing about reachability from
+        // the internet. Refusing to become READY here keeps the masternode out of every DKG round
+        // and gets it PoSe-banned for a router quirk, so continue and surface a warning instead.
+        m_warning = strprintf("Could not connect to own address %s; continuing. Verify that port %d is reachable "
+                              "from the internet, or the masternode will be PoSe-punished.",
+                              m_service.ToStringAddrPort(), m_service.GetPort());
+        // InitInternal is re-run on block tips, so rate-limit the log line to once per hour.
+        if (const int64_t now{GetTime()}; now - m_warning_log_time >= 3600) {
+            m_warning_log_time = now;
+            LogPrintf("CActiveMasternodeManager::Init -- WARNING: %s\n", m_warning);
+        }
+    } else {
+        m_warning.clear();
     }
 
     m_protx_hash = dmn->proTxHash;

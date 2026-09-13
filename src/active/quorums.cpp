@@ -8,6 +8,7 @@
 #include <bls/bls_ies.h>
 #include <bls/bls_worker.h>
 #include <evo/deterministicmns.h>
+#include <llmq/blockprocessor.h>
 #include <llmq/commitment.h>
 #include <llmq/dkgsessionmgr.h>
 #include <llmq/options.h>
@@ -25,6 +26,44 @@
 #include <cxxtimer.hpp>
 
 namespace llmq {
+std::vector<DkgOutcome> GetRecentDkgOutcomes(const uint256& proTxHash, const CQuorumBlockProcessor& qblockman,
+                                             CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
+                                             const ChainstateManager& chainman, const CBlockIndex* pindex)
+{
+    std::vector<DkgOutcome> ret;
+    if (pindex == nullptr || proTxHash.IsNull()) return ret;
+
+    for (const auto& [llmqType, quorums] : qblockman.GetMinedAndActiveCommitmentsUntilBlock(pindex)) {
+        // The most recent quorum of a type is first, see GetMinedAndActiveCommitmentsUntilBlock.
+        if (quorums.empty()) continue;
+        const CBlockIndex* pQuorumBaseBlockIndex = quorums.front();
+
+        const auto [qc, minedBlockHash] = qblockman.GetMinedCommitment(llmqType,
+                                                                       pQuorumBaseBlockIndex->GetBlockHash());
+        if (minedBlockHash.IsNull()) continue;
+
+        DkgOutcome outcome;
+        outcome.llmqType = llmqType;
+        outcome.quorumHash = pQuorumBaseBlockIndex->GetBlockHash();
+        if (const CBlockIndex* pMinedIndex = WITH_LOCK(::cs_main,
+                                                       return chainman.m_blockman.LookupBlockIndex(minedBlockHash));
+            pMinedIndex != nullptr) {
+            outcome.height = pMinedIndex->nHeight;
+        }
+
+        const auto members = utils::GetAllQuorumMembers(llmqType, {dmnman, qsnapman, chainman,
+                                                                   pQuorumBaseBlockIndex});
+        for (size_t i = 0; i < members.size(); ++i) {
+            if (members[i]->proTxHash != proTxHash) continue;
+            outcome.member = true;
+            outcome.valid = i < qc.validMembers.size() && qc.validMembers[i];
+            break;
+        }
+        ret.emplace_back(outcome);
+    }
+    return ret;
+}
+
 QuorumParticipant::QuorumParticipant(CBLSWorker& bls_worker, CConnman& connman, CDeterministicMNManager& dmnman,
                                      QuorumObserverParent& qman, CQuorumSnapshotManager& qsnapman,
                                      const CActiveMasternodeManager& mn_activeman, const ChainstateManager& chainman,

@@ -16,6 +16,8 @@
 #include <uint256.h>
 
 #include <map>
+#include <string>
+#include <vector>
 
 class CActiveMasternodeManager;
 class CBlockIndex;
@@ -28,9 +30,29 @@ class CSporkManager;
 struct MessageProcessingResult;
 namespace llmq {
 class CQuorum;
+class CQuorumBlockProcessor;
 class CQuorumDataRequest;
 class CQuorumSnapshotManager;
 enum class QvvecSyncMode : int8_t;
+} // namespace llmq
+
+namespace llmq {
+/** How a single mined final commitment turned out for one masternode. Informational only. */
+struct DkgOutcome {
+    Consensus::LLMQType llmqType{Consensus::LLMQType::LLMQ_NONE};
+    uint256 quorumHash;
+    int height{-1};
+    bool member{false};
+    bool valid{false};
+};
+
+/**
+ * Describe the newest mined commitment of every active LLMQ type from the point of view of
+ * proTxHash. Reads committed state only, touches no consensus rule and stores nothing.
+ */
+std::vector<DkgOutcome> GetRecentDkgOutcomes(const uint256& proTxHash, const CQuorumBlockProcessor& qblockman,
+                                             CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
+                                             const ChainstateManager& chainman, const CBlockIndex* pindex);
 } // namespace llmq
 
 namespace llmq {
