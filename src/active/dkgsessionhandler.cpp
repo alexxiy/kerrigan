@@ -570,26 +570,53 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     HandlePhase(QuorumPhase::Contribute, QuorumPhase::Complain, curQuorumHash, 0.05, fContributeStart, fContributeWait);
 
     // Complain
+    // Drain every contribution that is still queued BEFORE judging who failed to send one.
+    // After a block burst the queue routinely holds contributions that arrived while we were
+    // being pushed across the phase boundary; judging without draining marks their senders
+    // bad for a message we are holding in our own hands.
     auto fComplainStart = [this, &connman, &peerman]() {
+        while (ProcessPendingMessageBatch<CDKGContribution>(connman, *curSession, pendingContributions, peerman, 8)) {
+        }
         curSession->VerifyAndComplain(connman, pendingComplaints, peerman);
     };
     auto fComplainWait = [this, &connman, &peerman] {
-        return ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8);
+        // Keep accepting late contributions during Complain so that they are still recorded
+        // and can be reconciled, instead of being dropped on the floor.
+        const bool did_contributions{
+            ProcessPendingMessageBatch<CDKGContribution>(connman, *curSession, pendingContributions, peerman, 8)};
+        const bool did_complaints{
+            ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8)};
+        return did_contributions || did_complaints;
     };
     HandlePhase(QuorumPhase::Complain, QuorumPhase::Justify, curQuorumHash, 0.05, fComplainStart, fComplainWait);
 
     // Justify
-    auto fJustifyStart = [this, &peerman]() { curSession->VerifyAndJustify(pendingJustifications, peerman); };
+    auto fJustifyStart = [this, &connman, &peerman]() {
+        while (ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8)) {
+        }
+        curSession->VerifyAndJustify(pendingJustifications, peerman);
+    };
     auto fJustifyWait = [this, &connman, &peerman] {
-        return ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8);
+        const bool did_complaints{
+            ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8)};
+        const bool did_justifications{
+            ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8)};
+        return did_complaints || did_justifications;
     };
     HandlePhase(QuorumPhase::Justify, QuorumPhase::Commit, curQuorumHash, 0.05, fJustifyStart, fJustifyWait);
 
     // Commit
-    auto fCommitStart = [this, &peerman]() { curSession->VerifyAndCommit(pendingPrematureCommitments, peerman); };
+    auto fCommitStart = [this, &connman, &peerman]() {
+        while (ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8)) {
+        }
+        curSession->VerifyAndCommit(pendingPrematureCommitments, peerman);
+    };
     auto fCommitWait = [this, &connman, &peerman] {
-        return ProcessPendingMessageBatch<CDKGPrematureCommitment>(connman, *curSession, pendingPrematureCommitments,
-                                                                   peerman, 8);
+        const bool did_justifications{
+            ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8)};
+        const bool did_commitments{ProcessPendingMessageBatch<CDKGPrematureCommitment>(
+            connman, *curSession, pendingPrematureCommitments, peerman, 8)};
+        return did_justifications || did_commitments;
     };
     HandlePhase(QuorumPhase::Commit, QuorumPhase::Finalize, curQuorumHash, 0.1, fCommitStart, fCommitWait);
 
