@@ -13,6 +13,7 @@
 #include <scheduler.h>
 #include <protocol.h>
 #include <util/check.h>
+#include <util/sock.h>
 #include <util/time.h>
 
 namespace {
@@ -173,13 +174,55 @@ void CActiveMasternodeManager::InitInternal(const CBlockIndex* pindex)
     m_state = MasternodeState::READY;
 }
 
-/** The blocking half of the self-check. Holds no lock: a TCP connect can take seconds. */
-static bool ProbeSelfConnect(const CService& service)
+/**
+ * The blocking half of the self-check. Holds no lock, and gives up after `timeout`.
+ *
+ * This duplicates the connect plumbing of netbase's ConnectToSocket() rather than using
+ * ConnectDirectly(), because that one only knows the global -timeout and adding a parameter to
+ * netbase is outside the scope of this change. All we need from the socket is reachable or not.
+ */
+static bool ProbeSelfConnect(const CService& service, std::chrono::milliseconds timeout)
 {
-    std::unique_ptr<Sock> sock{ConnectDirectly(service, /*manual_connection=*/true)};
-    const bool fConnected{sock && sock->IsSelectable(/*is_select=*/::g_socket_events_mode == SocketEventsMode::Select)};
-    sock = std::make_unique<Sock>(INVALID_SOCKET);
-    return fConnected;
+    const bool is_select{::g_socket_events_mode == SocketEventsMode::Select};
+
+    std::unique_ptr<Sock> sock{CreateSock(service.GetSAFamily())};
+    if (!sock) return false;
+
+    struct sockaddr_storage addr_storage;
+    socklen_t addr_len = sizeof(addr_storage);
+    if (!service.GetSockAddr(reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len)) return false;
+
+    if (sock->Connect(reinterpret_cast<struct sockaddr*>(&addr_storage), addr_len) != SOCKET_ERROR) {
+        return sock->IsSelectable(is_select);
+    }
+
+    const int connect_err{WSAGetLastError()};
+#ifdef WIN32
+    if (connect_err == WSAEISCONN) return sock->IsSelectable(is_select);
+#endif
+    // WSAEINVAL is here because some legacy versions of winsock use it (see netbase.cpp).
+    if (connect_err != WSAEINPROGRESS && connect_err != WSAEWOULDBLOCK && connect_err != WSAEINVAL) {
+        return false;
+    }
+
+    // The connect is being established asynchronously; wait for it, but not for long.
+    Sock::Event occurred{0};
+    if (!sock->Wait(timeout, Sock::RECV | Sock::SEND, SocketEventsParams{::g_socket_events_mode}, &occurred) ||
+        occurred == 0) {
+        LogPrint(BCLog::NET, "self-check connection attempt to %s timed out after %dms\n",
+                 service.ToStringAddrPort(), count_milliseconds(timeout));
+        return false;
+    }
+
+    // A successful wait does not mean a successful connect; the verdict is in SO_ERROR.
+    int sockerr{0};
+    socklen_t sockerr_len = sizeof(sockerr);
+    if (sock->GetSockOpt(SOL_SOCKET, SO_ERROR, (sockopt_arg_type)&sockerr, &sockerr_len) == SOCKET_ERROR) {
+        return false;
+    }
+    if (sockerr != 0) return false;
+
+    return sock->IsSelectable(is_select);
 }
 
 bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
@@ -192,16 +235,13 @@ bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
         return true;
     }
 
-    if (m_selfcheck_strict) {
-        m_selfcheck = SelfCheckResult::FAILED;
-        return false;
-    }
-
     // A failed self-connect only proves that WE cannot reach our own external address from behind
     // our own router (no NAT hairpinning), which says nothing about reachability from the internet.
     // Refusing to run keeps the masternode out of every DKG round and gets it PoSe-banned for a
-    // router quirk, so continue and surface a warning instead.
-    m_selfcheck = SelfCheckResult::STRICT_OFF;
+    // router quirk, so continue and surface a warning instead. The diagnosis is the same in both
+    // modes: -masternodeselfcheck only decides whether a failure at STARTUP is fatal, and a running
+    // masternode is never demoted over it, so the warning has to be set either way or a strict-mode
+    // operator would see selfCheck=failed with nothing explaining it.
     m_warning = strprintf("Could not connect to own address %s; continuing. Verify that port %d is reachable "
                           "from the internet, or the masternode will be PoSe-punished.",
                           m_service.ToStringAddrPort(), m_service.GetPort());
@@ -209,6 +249,12 @@ bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
         m_warning_log_time = now;
         LogPrintf("CActiveMasternodeManager -- WARNING: %s\n", m_warning);
     }
+
+    if (m_selfcheck_strict) {
+        m_selfcheck = SelfCheckResult::FAILED;
+        return false;
+    }
+    m_selfcheck = SelfCheckResult::STRICT_OFF;
     return true;
 }
 
@@ -223,12 +269,14 @@ bool CActiveMasternodeManager::RunSelfCheck()
         return true;
     }
 
-    // Startup only, and the caller needs the verdict before it can decide READY vs SOME_ERROR,
-    // so this one stays synchronous. It does not run on the validation-interface thread.
-    return ApplySelfCheckResult(ProbeSelfConnect(m_service));
+    // The caller needs the verdict before it can decide READY vs SOME_ERROR, so this one stays
+    // synchronous and runs under cs. It is reached from init and from UpdatedBlockTip (through
+    // reset()), so it can run on the validation-interface thread; the probe's own 2 s deadline is
+    // what keeps that bounded.
+    return ApplySelfCheckResult(ProbeSelfConnect(m_service, MASTERNODE_SELF_CHECK_TIMEOUT));
 }
 
-void CActiveMasternodeManager::RunScheduledSelfCheck()
+void CActiveMasternodeManager::RunScheduledSelfCheck(uint64_t generation)
 {
     CService service;
     {
@@ -237,13 +285,18 @@ void CActiveMasternodeManager::RunScheduledSelfCheck()
     }
 
     // Connect outside cs: every RPC that reads our state would otherwise block for the whole
-    // connect timeout, and so would the next block notification.
-    const bool fConnected{ProbeSelfConnect(service)};
+    // connect timeout. This still runs on the scheduler thread, which is the same thread that
+    // dispatches validation-interface callbacks (init.cpp hands it to
+    // RegisterBackgroundSignalScheduler), so the probe's 2 s deadline is what keeps block
+    // notifications from queueing up behind it.
+    const bool fConnected{ProbeSelfConnect(service, MASTERNODE_SELF_CHECK_TIMEOUT)};
 
     LOCK(cs);
     m_selfcheck_queued = false;
     // The state can have moved on while we were probing (MN removed, IP changed). Only a still
-    // READY masternode with the same address has anything to learn from this result.
+    // READY masternode with the same address and the same identity has anything to learn from
+    // this result; a reset in the meantime bumps the generation and voids it.
+    if (m_selfcheck_generation != generation) return;
     if (m_state != MasternodeState::READY || m_service != service) return;
     // Deliberately ignore the return value: a periodic probe never demotes a running masternode,
     // not even with -masternodeselfcheck=1. Losing hairpinning mid-flight must not cost quorums.
@@ -252,6 +305,7 @@ void CActiveMasternodeManager::RunScheduledSelfCheck()
 
 void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
 {
+    uint64_t generation{0};
     {
         LOCK(cs);
         if (m_state != MasternodeState::READY) return;
@@ -265,20 +319,24 @@ void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
             return;
         }
         m_selfcheck_queued = true;
+        generation = m_selfcheck_generation;
     }
 
     // The probe at startup is only a snapshot: port forwards die long afterwards (router reboot,
     // ISP moving us behind CGNAT). Keep the warning current, but never take a running masternode
     // out of its quorums over it; the operator decides what to do with the warning.
     //
-    // We are on the validation-interface thread here, so hand the blocking connect to the
-    // scheduler. The scheduler is stopped long before this object is destroyed, so capturing
-    // this is safe.
+    // We are on the validation-interface thread here, holding nothing, so hand the blocking
+    // connect to the scheduler. That does not move it off the signal thread (the scheduler IS the
+    // background signal dispatcher), but it does get it out from under cs, and the probe is bounded
+    // to MASTERNODE_SELF_CHECK_TIMEOUT. The scheduler is stopped long before this object is
+    // destroyed, so capturing this is safe.
     if (CScheduler* scheduler{m_scheduler.load(std::memory_order_acquire)}) {
-        scheduler->scheduleFromNow([this] { RunScheduledSelfCheck(); }, std::chrono::milliseconds{0});
+        scheduler->scheduleFromNow([this, generation] { RunScheduledSelfCheck(generation); },
+                                   std::chrono::milliseconds{0});
     } else {
         // No scheduler (unit tests): behave exactly as before.
-        RunScheduledSelfCheck();
+        RunScheduledSelfCheck(generation);
     }
 }
 
@@ -311,6 +369,12 @@ void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, con
             m_state = state;
             m_protx_hash = uint256();
             m_outpoint.SetNull();
+            // Whatever we knew about reachability belonged to the identity we just lost. Clear it
+            // and void any probe still in flight for it; InitInternal below establishes it afresh.
+            ++m_selfcheck_generation;
+            m_selfcheck = SelfCheckResult::SKIPPED;
+            m_selfcheck_height = -1;
+            m_warning.clear();
             // MN might have reappeared in same block with a new ProTx
             InitInternal(pindexNew);
         };

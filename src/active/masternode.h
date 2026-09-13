@@ -13,6 +13,7 @@
 #include <validationinterface.h>
 
 #include <atomic>
+#include <chrono>
 #include <string>
 
 class CConnman;
@@ -30,6 +31,12 @@ static constexpr bool DEFAULT_MASTERNODE_SELF_CHECK{false};
 static constexpr int MASTERNODE_SELF_CHECK_INTERVAL_BLOCKS{24};
 /** Do not repeat the self-check warning in the log more often than this. */
 static constexpr int64_t MASTERNODE_SELF_CHECK_LOG_INTERVAL{3600};
+/**
+ * Deadline for the self-connect probe. netbase's ConnectDirectly() honours the global -timeout
+ * (5 s by default, and an operator can raise it), which is far too long to spend on the scheduler
+ * thread for a diagnostic, so the probe uses its own bound.
+ */
+static constexpr std::chrono::milliseconds MASTERNODE_SELF_CHECK_TIMEOUT{2000};
 
 class CActiveMasternodeManager
 {
@@ -75,6 +82,8 @@ private:
     std::string m_warning GUARDED_BY(cs);
     int64_t m_warning_log_time GUARDED_BY(cs){0};
     SelfCheckResult m_selfcheck GUARDED_BY(cs){SelfCheckResult::SKIPPED};
+    // Bumped whenever our identity changes, so a probe queued for the old one is discarded.
+    uint64_t m_selfcheck_generation GUARDED_BY(cs){0};
     // Height of the last probe, -1 when we have not probed since becoming READY.
     int m_selfcheck_height GUARDED_BY(cs){-1};
     /** A probe is already queued or in flight, so do not queue a second one behind it. */
@@ -119,7 +128,7 @@ private:
     //! Probe our own advertised address. Returns false only when strict mode turns a failure fatal.
     bool ApplySelfCheckResult(bool connected) EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool RunSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(cs);
-    void RunScheduledSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    void RunScheduledSelfCheck(uint64_t generation) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     //! Re-probe if enough blocks have passed since the last probe. Never changes m_state.
     void MaybeRunSelfCheck(int nHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool GetLocalAddress(CService& addrRet) EXCLUSIVE_LOCKS_REQUIRED(cs);

@@ -23,6 +23,9 @@
 #include <recovery/recovery.h>
 #include <util/check.h>
 #include <validation.h>
+
+#include <algorithm>
+#include <vector>
 #include <validationinterface.h>
 
 ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman, CConnman& connman,
@@ -106,23 +109,29 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
     if (recovery::IsQuarantined()) return;
 
     nodeman->UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload);
-    UpdateDkgOutcomes(pindexNew);
+    UpdateDkgOutcomes(pindexNew, pindexFork);
     ehf_sighandler->UpdatedBlockTip(pindexNew);
     gov_signer->UpdatedBlockTip(pindexNew);
     qdkgsman->UpdatedBlockTip(pindexNew, fInitialDownload);
     qman_handler->UpdatedBlockTip(pindexNew, fInitialDownload);
 }
 
-void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew)
+void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork)
 {
     const uint256 proTxHash{nodeman->GetProTxHash()};
     if (proTxHash.IsNull()) return;
 
-    // A commitment can only be mined inside a type's mining window. Once the cache has been primed
-    // every other tip, including every extra tip of a burst, costs a single height comparison.
-    if (WITH_LOCK(m_dkg_outcomes_mutex, return m_dkg_outcomes_primed) &&
-        !llmq::IsPossibleCommitmentHeight(pindexNew->nHeight)) {
-        return;
+    // A commitment can only be mined inside a type's mining window, so most tips need no scan.
+    // The window has to be tested against every height this notification brought us, though:
+    // UpdatedBlockTip fires once per ActivateBestChain batch, and a burst that connects the
+    // commitment plus a few more blocks lands on a tip well past the window.
+    {
+        LOCK(m_dkg_outcomes_mutex);
+        const int fork_height{pindexFork != nullptr ? pindexFork->nHeight : -1};
+        const int from{std::max(m_last_scanned_height, fork_height)};
+        const bool primed{m_dkg_outcomes_primed};
+        m_last_scanned_height = pindexNew->nHeight;
+        if (primed && !llmq::SpanCanCarryCommitment(from, pindexNew->nHeight)) return;
     }
 
     const auto outcomes{llmq::GetRecentDkgOutcomes(proTxHash, m_qblockman, m_dmnman, m_qsnapman, m_chainman,
@@ -136,8 +145,9 @@ void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew)
 
     for (const auto& outcome : outcomes) {
         auto& cached = m_dkg_outcomes[{outcome.llmqType, outcome.quorumIndex}];
-        // Same commitment as last time, or an older one because a reorg moved us back: say nothing.
-        if (cached.minedBlockHash == outcome.minedBlockHash || outcome.height <= cached.height) continue;
+        // Only the very same commitment is old news. A different one at the same height is a reorg
+        // that replaced the block we reported, and its validMembers can differ from what we said.
+        if (cached.minedBlockHash == outcome.minedBlockHash || outcome.height < cached.height) continue;
         cached = outcome;
         if (priming) continue;
 
@@ -152,14 +162,24 @@ void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew)
 
 std::optional<llmq::DkgOutcome> ActiveContext::GetLastDkgOutcome() const
 {
-    LOCK(m_dkg_outcomes_mutex);
-    const llmq::DkgOutcome* newest{nullptr};
-    for (const auto& [key, outcome] : m_dkg_outcomes) {
-        if (outcome.height < 0) continue;
-        if (newest == nullptr || outcome.height > newest->height) {
-            newest = &outcome;
+    std::vector<llmq::DkgOutcome> candidates;
+    {
+        LOCK(m_dkg_outcomes_mutex);
+        for (const auto& [key, outcome] : m_dkg_outcomes) {
+            if (outcome.height >= 0) candidates.emplace_back(outcome);
         }
     }
-    if (newest == nullptr) return std::nullopt;
-    return *newest;
+    // Newest first. Snapshotted before taking cs_main so the two locks are never held together.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const llmq::DkgOutcome& a, const llmq::DkgOutcome& b) { return a.height > b.height; });
+
+    LOCK(::cs_main);
+    for (const auto& outcome : candidates) {
+        // A reorg can orphan the block an outcome came from long before a new commitment replaces
+        // the cache entry. Reporting it would describe a quorum this chain no longer has, so skip
+        // it and fall back to the newest outcome that is still on the active chain.
+        const CBlockIndex* pindex{m_chainman.m_blockman.LookupBlockIndex(outcome.minedBlockHash)};
+        if (pindex != nullptr && m_chainman.ActiveChain().Contains(pindex)) return outcome;
+    }
+    return std::nullopt;
 }

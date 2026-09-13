@@ -57,6 +57,14 @@ struct DkgOutcome {
 bool IsPossibleCommitmentHeight(int nHeight);
 
 /**
+ * Whether any height in (from, to] could carry a mined commitment. UpdatedBlockTip fires once per
+ * ActivateBestChain batch, so a burst can connect a commitment and then several more blocks before
+ * we hear anything: asking only about the tip would miss exactly the case this release targets.
+ * `from` may be negative, meaning nothing has been looked at yet.
+ */
+bool SpanCanCarryCommitment(int from, int to);
+
+/**
  * Describe the newest mined commitment in which proTxHash was a member, for every active LLMQ type
  * and, for rotating types, every quorum index. Reads committed commitments only, touches no
  * consensus rule and stores nothing. Outcomes we cannot date (no block index for the mined block)
