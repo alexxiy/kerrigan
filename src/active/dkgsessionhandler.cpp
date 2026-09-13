@@ -17,6 +17,7 @@
 #include <logging.h>
 #include <recovery/recovery.h>
 #include <util/thread.h>
+#include <util/time.h>
 #include <validation.h>
 
 namespace llmq {
@@ -95,6 +96,24 @@ std::pair<QuorumPhase, uint256> ActiveDKGSessionHandler::GetPhaseAndQuorumHash()
     return std::make_pair(phase, quorumHash);
 }
 
+namespace {
+//! One summary line per LLMQ type per day is enough to tell an operator the type cannot form.
+constexpr int64_t UNFORMABLE_QUORUM_LOG_INTERVAL{24 * 60 * 60};
+Mutex cs_unformable_log;
+std::map<Consensus::LLMQType, int64_t> unformable_log_time GUARDED_BY(cs_unformable_log);
+
+bool ShouldLogUnformableQuorum(Consensus::LLMQType llmqType)
+{
+    const int64_t now{GetTime()};
+    LOCK(cs_unformable_log);
+    if (auto& last = unformable_log_time[llmqType]; now - last >= UNFORMABLE_QUORUM_LOG_INTERVAL) {
+        last = now;
+        return true;
+    }
+    return false;
+}
+} // anonymous namespace
+
 bool ActiveDKGSessionHandler::InitNewQuorum(gsl::not_null<const CBlockIndex*> pQuorumBaseBlockIndex)
 {
     if (!DeploymentDIP0003Enforced(pQuorumBaseBlockIndex->nHeight, Params().GetConsensus())) {
@@ -113,8 +132,25 @@ bool ActiveDKGSessionHandler::InitNewQuorum(gsl::not_null<const CBlockIndex*> pQ
                                                     pQuorumBaseBlockIndex, params);
 
     if (!curSession->Init(m_mn_activeman.GetProTxHash(), quorumIndex)) {
-        LogPrintf("ActiveDKGSessionHandler::%s -- height[%d] quorum initialization failed for %s qi[%d]\n", __func__,
-                  pQuorumBaseBlockIndex->nHeight, curSession->params.name, quorumIndex);
+        // Dash ships LLMQ types (llmq_100_67, llmq_400_60, llmq_400_85, the rotating llmq_60_75)
+        // that can never gather minSize members on a network this small. Logging their failure at
+        // the default level on every round buries real DKG problems, so demote the "too few
+        // eligible masternodes" case and keep one summary line per type per day.
+        const size_t member_count{curSession->members.size()};
+        if (member_count < static_cast<size_t>(params.minSize)) {
+            LogPrint(BCLog::LLMQ_DKG, /* Continued */
+                     "ActiveDKGSessionHandler::%s -- height[%d] quorum initialization failed for %s qi[%d]: "
+                     "%d eligible masternodes < minSize %d\n",
+                     __func__, pQuorumBaseBlockIndex->nHeight, curSession->params.name, quorumIndex, member_count,
+                     params.minSize);
+            if (ShouldLogUnformableQuorum(params.type)) {
+                LogPrintf("llmq type %s cannot form: %d eligible masternodes < minSize %d\n", params.name,
+                          member_count, params.minSize);
+            }
+        } else {
+            LogPrintf("ActiveDKGSessionHandler::%s -- height[%d] quorum initialization failed for %s qi[%d]\n",
+                      __func__, pQuorumBaseBlockIndex->nHeight, curSession->params.name, quorumIndex);
+        }
         return false;
     }
 
