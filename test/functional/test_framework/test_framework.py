@@ -1007,7 +1007,12 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
             os.rmdir(cache_path('wallets'))  # Remove empty wallets dir
             for entry in os.listdir(cache_path()):
                 if entry not in ['chainstate', 'blocks', 'indexes', 'evodb', 'llmq']:  # Keep some folders
-                    os.remove(cache_path(entry))
+                    # Kerrigan datadirs also carry directories (e.g. sapling/) that
+                    # os.remove() cannot delete; a fresh cache build died here.
+                    if os.path.isdir(cache_path(entry)):
+                        shutil.rmtree(cache_path(entry))
+                    else:
+                        os.remove(cache_path(entry))
 
         for i in range(self.num_nodes):
             self.log.debug("Copy cache directory {} to node {}".format(cache_node_dir, i))
