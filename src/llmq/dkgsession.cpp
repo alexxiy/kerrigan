@@ -180,17 +180,20 @@ bool CDKGSession::PreVerifyMessage(const CDKGContribution& qc, bool& retBan) con
         return false;
     }
 
-    if (!CBLSWorker::VerifyVerificationVector(*qc.vvec)) {
-        logger.Batch("invalid verification vector");
-        retBan = true;
-        return false;
-    }
-
     if (member->contributions.size() >= 2) {
         // don't do any further processing if we got more than 1 valid contributions already
         // this is a DoS protection against members sending multiple contributions with valid signatures to us
-        // we must bail out before any expensive BLS verification happens
+        // we must bail out before any expensive BLS verification happens - which is why this
+        // check sits above VerifyVerificationVector and not below it: a forged duplicate that
+        // only has to carry the right proTxHash and the right vector length must not be able
+        // to buy itself a pairing check on our CPU.
         logger.Batch("dropping contribution from %s as we already got %d contributions", member->dmn->proTxHash.ToString(), member->contributions.size());
+        return false;
+    }
+
+    if (!CBLSWorker::VerifyVerificationVector(*qc.vvec)) {
+        logger.Batch("invalid verification vector");
+        retBan = true;
         return false;
     }
 
