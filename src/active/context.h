@@ -27,6 +27,7 @@ class CDeterministicMNManager;
 class CGovernanceManager;
 class CMasternodeMetaMan;
 class CMasternodeSync;
+class CScheduler;
 class CMNHFManager;
 class CSporkManager;
 class CTxMemPool;
@@ -86,7 +87,7 @@ public:
                            llmq::DkgPhaseDwellMode dkg_phase_dwell_mode, bool selfcheck_strict);
     ~ActiveContext();
 
-    void Start(CConnman& connman, PeerManager& peerman);
+    void Start(CConnman& connman, PeerManager& peerman, CScheduler& scheduler);
     void Stop();
 
     //! Newest mined commitment this masternode was a member of, or nullopt when there is none.

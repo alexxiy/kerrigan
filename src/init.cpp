@@ -3557,7 +3557,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     if (node.active_ctx) {
-        node.active_ctx->Start(*node.connman, *node.peerman);
+        node.active_ctx->Start(*node.connman, *node.peerman, *node.scheduler);
         node.scheduler->scheduleEvery(std::bind(&llmq::CDKGSessionManager::CleanupOldContributions, std::ref(*node.active_ctx->qdkgsman)), std::chrono::hours{1});
     }
 

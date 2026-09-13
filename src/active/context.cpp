@@ -71,8 +71,10 @@ ActiveContext::~ActiveContext()
     m_isman.DisconnectSigner();
 }
 
-void ActiveContext::Start(CConnman& connman, PeerManager& peerman)
+void ActiveContext::Start(CConnman& connman, PeerManager& peerman, CScheduler& scheduler)
 {
+    // Keeps the periodic self-connect probe off the validation-interface thread.
+    nodeman->SetScheduler(scheduler);
     qman_handler->Start();
     qdkgsman->StartThreads(connman, peerman);
     cl_signer->Start();

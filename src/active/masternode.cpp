@@ -10,6 +10,7 @@
 #include <evo/deterministicmns.h>
 #include <net.h>
 #include <netbase.h>
+#include <scheduler.h>
 #include <protocol.h>
 #include <util/check.h>
 #include <util/time.h>
@@ -172,20 +173,18 @@ void CActiveMasternodeManager::InitInternal(const CBlockIndex* pindex)
     m_state = MasternodeState::READY;
 }
 
-bool CActiveMasternodeManager::RunSelfCheck()
+/** The blocking half of the self-check. Holds no lock: a TCP connect can take seconds. */
+static bool ProbeSelfConnect(const CService& service)
 {
-    AssertLockHeld(cs);
-
-    if (!Params().RequireRoutableExternalIP()) {
-        // regtest and friends accept any address, so there is nothing meaningful to probe.
-        m_selfcheck = SelfCheckResult::SKIPPED;
-        m_warning.clear();
-        return true;
-    }
-
-    std::unique_ptr<Sock> sock{ConnectDirectly(m_service, /*manual_connection=*/true)};
+    std::unique_ptr<Sock> sock{ConnectDirectly(service, /*manual_connection=*/true)};
     const bool fConnected{sock && sock->IsSelectable(/*is_select=*/::g_socket_events_mode == SocketEventsMode::Select)};
     sock = std::make_unique<Sock>(INVALID_SOCKET);
+    return fConnected;
+}
+
+bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
+{
+    AssertLockHeld(cs);
 
     if (fConnected) {
         m_selfcheck = SelfCheckResult::OK;
@@ -213,16 +212,74 @@ bool CActiveMasternodeManager::RunSelfCheck()
     return true;
 }
 
+bool CActiveMasternodeManager::RunSelfCheck()
+{
+    AssertLockHeld(cs);
+
+    if (!Params().RequireRoutableExternalIP()) {
+        // regtest and friends accept any address, so there is nothing meaningful to probe.
+        m_selfcheck = SelfCheckResult::SKIPPED;
+        m_warning.clear();
+        return true;
+    }
+
+    // Startup only, and the caller needs the verdict before it can decide READY vs SOME_ERROR,
+    // so this one stays synchronous. It does not run on the validation-interface thread.
+    return ApplySelfCheckResult(ProbeSelfConnect(m_service));
+}
+
+void CActiveMasternodeManager::RunScheduledSelfCheck()
+{
+    CService service;
+    {
+        READ_LOCK(cs);
+        service = m_service;
+    }
+
+    // Connect outside cs: every RPC that reads our state would otherwise block for the whole
+    // connect timeout, and so would the next block notification.
+    const bool fConnected{ProbeSelfConnect(service)};
+
+    LOCK(cs);
+    m_selfcheck_queued = false;
+    // The state can have moved on while we were probing (MN removed, IP changed). Only a still
+    // READY masternode with the same address has anything to learn from this result.
+    if (m_state != MasternodeState::READY || m_service != service) return;
+    // Deliberately ignore the return value: a periodic probe never demotes a running masternode,
+    // not even with -masternodeselfcheck=1. Losing hairpinning mid-flight must not cost quorums.
+    ApplySelfCheckResult(fConnected);
+}
+
 void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
 {
-    LOCK(cs);
-    if (m_state != MasternodeState::READY) return;
-    if (m_selfcheck_height >= 0 && nHeight - m_selfcheck_height < MASTERNODE_SELF_CHECK_INTERVAL_BLOCKS) return;
-    m_selfcheck_height = nHeight;
+    {
+        LOCK(cs);
+        if (m_state != MasternodeState::READY) return;
+        if (m_selfcheck_queued) return;
+        if (m_selfcheck_height >= 0 && nHeight - m_selfcheck_height < MASTERNODE_SELF_CHECK_INTERVAL_BLOCKS) return;
+        m_selfcheck_height = nHeight;
+        if (!Params().RequireRoutableExternalIP()) {
+            // regtest and friends accept any address, so there is nothing meaningful to probe.
+            m_selfcheck = SelfCheckResult::SKIPPED;
+            m_warning.clear();
+            return;
+        }
+        m_selfcheck_queued = true;
+    }
+
     // The probe at startup is only a snapshot: port forwards die long afterwards (router reboot,
     // ISP moving us behind CGNAT). Keep the warning current, but never take a running masternode
     // out of its quorums over it; the operator decides what to do with the warning.
-    RunSelfCheck();
+    //
+    // We are on the validation-interface thread here, so hand the blocking connect to the
+    // scheduler. The scheduler is stopped long before this object is destroyed, so capturing
+    // this is safe.
+    if (CScheduler* scheduler{m_scheduler.load(std::memory_order_acquire)}) {
+        scheduler->scheduleFromNow([this] { RunScheduledSelfCheck(); }, std::chrono::milliseconds{0});
+    } else {
+        // No scheduler (unit tests): behave exactly as before.
+        RunScheduledSelfCheck();
+    }
 }
 
 std::string CActiveMasternodeManager::GetSelfCheckString() const

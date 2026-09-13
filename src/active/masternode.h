@@ -12,10 +12,12 @@
 #include <threadsafety.h>
 #include <validationinterface.h>
 
+#include <atomic>
 #include <string>
 
 class CConnman;
 class CDeterministicMNManager;
+class CScheduler;
 
 /**
  * Default for -masternodeselfcheck. A failed connection to our own external address usually means
@@ -37,6 +39,13 @@ private:
     const CBLSPublicKey m_operator_pk;
     const CBLSSecretKey m_operator_sk;
     const bool m_selfcheck_strict;
+    /**
+     * Set once before the first block notification. The periodic self-check probe blocks on a
+     * TCP connect, which must not happen on the validation-interface thread, so it runs here.
+     * Null in unit tests and other embeddings that never start a scheduler; the probe then runs
+     * inline exactly as it used to.
+     */
+    std::atomic<CScheduler*> m_scheduler{nullptr};
 
 private:
     enum class MasternodeState {
@@ -68,6 +77,8 @@ private:
     SelfCheckResult m_selfcheck GUARDED_BY(cs){SelfCheckResult::SKIPPED};
     // Height of the last probe, -1 when we have not probed since becoming READY.
     int m_selfcheck_height GUARDED_BY(cs){-1};
+    /** A probe is already queued or in flight, so do not queue a second one behind it. */
+    bool m_selfcheck_queued GUARDED_BY(cs){false};
     uint256 m_protx_hash GUARDED_BY(cs);
 
 public:
@@ -86,6 +97,8 @@ public:
     std::string GetStateString() const;
     std::string GetStatus() const;
     [[nodiscard]] std::string GetWarning() const { READ_LOCK(cs); return m_warning; }
+    /** Hand us the node scheduler so the periodic probe stays off the validation thread. */
+    void SetScheduler(CScheduler& scheduler) { m_scheduler.store(&scheduler, std::memory_order_release); }
     [[nodiscard]] std::string GetSelfCheckString() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     static bool IsValidNetAddr(const CService& addrIn);
@@ -104,7 +117,9 @@ public:
 private:
     void InitInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs);
     //! Probe our own advertised address. Returns false only when strict mode turns a failure fatal.
+    bool ApplySelfCheckResult(bool connected) EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool RunSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void RunScheduledSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(!cs);
     //! Re-probe if enough blocks have passed since the last probe. Never changes m_state.
     void MaybeRunSelfCheck(int nHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool GetLocalAddress(CService& addrRet) EXCLUSIVE_LOCKS_REQUIRED(cs);
