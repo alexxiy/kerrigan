@@ -16,6 +16,8 @@
 #include <deploymentstatus.h>
 #include <logging.h>
 #include <recovery/recovery.h>
+#include <util/strencodings.h>
+#include <util/string.h>
 #include <util/thread.h>
 #include <util/time.h>
 #include <validation.h>
@@ -28,7 +30,7 @@ ActiveDKGSessionHandler::ActiveDKGSessionHandler(
     llmq::CDKGDebugManager& dkgdbgman, llmq::CDKGSessionManager& qdkgsman, llmq::CQuorumBlockProcessor& qblockman,
     llmq::CQuorumSnapshotManager& qsnapman, const CActiveMasternodeManager& mn_activeman, const ChainstateManager& chainman,
     const CSporkManager& sporkman, const Consensus::LLMQParams& llmq_params, bool quorums_watch, int dkg_phase_dwell,
-    int quorums_idx) :
+    DkgPhaseDwellMode dkg_phase_dwell_mode, int quorums_idx) :
     llmq::CDKGSessionHandler(llmq_params),
     m_bls_worker{bls_worker},
     m_dmnman{dmnman},
@@ -42,6 +44,7 @@ ActiveDKGSessionHandler::ActiveDKGSessionHandler(
     m_sporkman{sporkman},
     m_quorums_watch{quorums_watch},
     m_dkg_phase_dwell{dkg_phase_dwell},
+    m_dkg_phase_dwell_mode{dkg_phase_dwell_mode},
     quorumIndex{quorums_idx}
 {
 }
@@ -326,10 +329,79 @@ void ActiveDKGSessionHandler::SleepBeforePhase(QuorumPhase curPhase, const uint2
 // applied even when the chain has already jumped several phases ahead - that is exactly the
 // case it exists for. It is purely local scheduling: no change to block validity and nothing
 // different on the wire.
+// Reads "1.3.3" out of a "/Kerrigan:1.3.3(comment)/" user agent. Anything we cannot read is
+// treated as "not dwell-aware", which is the safe direction: it only ever keeps the dwell off.
+static bool ParseKerriganVersion(const std::string& sub_ver, int& major, int& minor, int& patch)
+{
+    static const std::string prefix{"/Kerrigan:"};
+    const size_t start{sub_ver.find(prefix)};
+    if (start == std::string::npos) {
+        return false;
+    }
+    const size_t vstart{start + prefix.size()};
+    const size_t end{sub_ver.find_first_of("(/", vstart)};
+    if (end == std::string::npos || end <= vstart) {
+        return false;
+    }
+    const std::vector<std::string> parts{SplitString(sub_ver.substr(vstart, end - vstart), '.')};
+    if (parts.size() < 3) {
+        return false;
+    }
+    return ParseInt32(parts[0], &major) && ParseInt32(parts[1], &minor) && ParseInt32(parts[2], &patch);
+}
+
+// Decide once per round whether the dwell applies. A dwell that only some members honour is
+// worse than no dwell at all: the dwellers accept a late contribution the others already
+// judged bad, the two groups then mine different bitsets, and if neither reaches minSize the
+// round produces no commitment and everybody who was dropped takes a PoSe penalty anyway. So
+// in `auto` we arm only when the quorum is overwhelmingly on a client that dwells too, and we
+// re-decide every round so the network converges on its own as operators upgrade.
+bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
+{
+    int dwell_aware{1}; // ourselves
+    connman.ForEachNode([&](const CNode* pnode) {
+        const uint256 proTxHash{pnode->GetVerifiedProRegTxHash()};
+        if (proTxHash.IsNull() || curSession->GetMember(proTxHash) == nullptr) {
+            return;
+        }
+        const std::string sub_ver{WITH_LOCK(pnode->m_subver_mutex, return pnode->cleanSubVer)};
+        int major{0}, minor{0}, patch{0};
+        if (!ParseKerriganVersion(sub_ver, major, minor, patch)) {
+            return;
+        }
+        if (major > DKG_PHASE_DWELL_MIN_MAJOR ||
+            (major == DKG_PHASE_DWELL_MIN_MAJOR &&
+             (minor > DKG_PHASE_DWELL_MIN_MINOR ||
+              (minor == DKG_PHASE_DWELL_MIN_MINOR && patch >= DKG_PHASE_DWELL_MIN_PATCH)))) {
+            ++dwell_aware;
+        }
+    });
+
+    // minSize + margin keeps us clear of the smallest bitset that can still win a round. On a
+    // quorum too small for that (regtest) require every member instead.
+    const int needed{std::min(params.minSize + DKG_PHASE_DWELL_ARM_MARGIN, params.size)};
+    bool armed{false};
+    switch (m_dkg_phase_dwell_mode) {
+    case DkgPhaseDwellMode::Off:
+        armed = false;
+        break;
+    case DkgPhaseDwellMode::On:
+        armed = true;
+        break;
+    case DkgPhaseDwellMode::Auto:
+        armed = dwell_aware >= needed;
+        break;
+    }
+    // Logged in every mode, once per round: the survey is what an operator needs to see to
+    // know why `auto` is or is not dwelling yet, and it is cheap next to a round of BLS.
+    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell %s for this round, dwell-aware members=%d needed=%d size=%d\n", __func__, params.name, quorumIndex, armed ? "armed" : "NOT armed", dwell_aware, needed, params.size);
+    return armed;
+}
+
 void ActiveDKGSessionHandler::WaitPhaseDwell(QuorumPhase curPhase, const uint256& expectedQuorumHash,
                                              const WhileWaitFunc& runWhileWaiting) const
 {
-    if (m_dkg_phase_dwell <= 0 || !curSession->AreWeMember()) {
+    if (m_dkg_phase_dwell <= 0 || !m_dwell_armed.load() || !curSession->AreWeMember()) {
         // A non-member judges nobody, so it has nothing to wait for and should not hold back
         // its own (observer-only) progress.
         return;
@@ -633,8 +705,10 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     pendingComplaints.Clear();
     pendingJustifications.Clear();
     pendingPrematureCommitments.Clear();
-    // The dwell is per round: the first start handler of a new round must never be delayed.
+    // The dwell is per round: the first start handler of a new round must never be delayed,
+    // and whether it applies at all is re-decided below once the quorum is connected.
     m_phase_start_ms = 0;
+    m_dwell_armed = false;
     uint256 curQuorumHash = WITH_LOCK(cs_phase_qhash, return quorumHash);
 
     const CBlockIndex* pQuorumBaseBlockIndex = WITH_LOCK(::cs_main,
@@ -673,6 +747,10 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     }
 
     WaitForNextPhase(QuorumPhase::Initialized, QuorumPhase::Contribute, curQuorumHash);
+
+    // Decided here, after the Initialized phase has had its blocks to bring the intra-quorum
+    // connections up, so the version survey sees the real membership.
+    m_dwell_armed = ComputeDwellArmed(connman);
 
     // Contribute
     auto fContributeStart = [this, &peerman]() { curSession->Contribute(pendingContributions, peerman); };
