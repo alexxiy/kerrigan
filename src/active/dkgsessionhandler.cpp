@@ -16,6 +16,8 @@
 #include <deploymentstatus.h>
 #include <logging.h>
 #include <recovery/recovery.h>
+#include <saltedhasher.h>
+#include <sync.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/thread.h>
@@ -350,6 +352,18 @@ static bool ParseKerriganVersion(const std::string& sub_ver, int& major, int& mi
     return ParseInt32(parts[0], &major) && ParseInt32(parts[1], &minor) && ParseInt32(parts[2], &patch);
 }
 
+// Cumulative, process-wide record of which masternodes have been seen advertising a client
+// that honours the dwell, keyed by proTxHash. It is deliberately never pruned within a
+// process: the survey is taken right after a phase boundary, and a block burst crosses that
+// boundary in milliseconds - long before MNAUTH has finished on every link - so a count that
+// moved with connection timing would put different nodes on different sides of the threshold
+// during the same round, which is the split the arming rule exists to prevent. Growing only,
+// it is stable across a round and converges between nodes within hours under SPORK_21.
+// Shared by every quorum type's handler because a masternode's client version is a property
+// of the node, not of the quorum we happened to meet it in.
+static Mutex cs_dwell_aware;
+static Uint256HashMap<bool> g_dwell_aware GUARDED_BY(cs_dwell_aware);
+
 // Decide once per round whether the dwell applies. A dwell that only some members honour is
 // worse than no dwell at all: the dwellers accept a late contribution the others already
 // judged bad, the two groups then mine different bitsets, and if neither reaches minSize the
@@ -358,24 +372,44 @@ static bool ParseKerriganVersion(const std::string& sub_ver, int& major, int& mi
 // re-decide every round so the network converges on its own as operators upgrade.
 bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
 {
-    int dwell_aware{1}; // ourselves
+    // Refresh the record from whatever peers we can see right now. Every verified masternode
+    // peer is recorded, not just members of this quorum, because the next round draws a
+    // different membership from the same network.
     connman.ForEachNode([&](const CNode* pnode) {
         const uint256 proTxHash{pnode->GetVerifiedProRegTxHash()};
-        if (proTxHash.IsNull() || curSession->GetMember(proTxHash) == nullptr) {
+        if (proTxHash.IsNull()) {
             return;
         }
         const std::string sub_ver{WITH_LOCK(pnode->m_subver_mutex, return pnode->cleanSubVer)};
         int major{0}, minor{0}, patch{0};
-        if (!ParseKerriganVersion(sub_ver, major, minor, patch)) {
-            return;
-        }
-        if (major > DKG_PHASE_DWELL_MIN_MAJOR ||
-            (major == DKG_PHASE_DWELL_MIN_MAJOR &&
-             (minor > DKG_PHASE_DWELL_MIN_MINOR ||
-              (minor == DKG_PHASE_DWELL_MIN_MINOR && patch >= DKG_PHASE_DWELL_MIN_PATCH)))) {
-            ++dwell_aware;
-        }
+        const bool aware{ParseKerriganVersion(sub_ver, major, minor, patch) &&
+                         (major > DKG_PHASE_DWELL_MIN_MAJOR ||
+                          (major == DKG_PHASE_DWELL_MIN_MAJOR &&
+                           (minor > DKG_PHASE_DWELL_MIN_MINOR ||
+                            (minor == DKG_PHASE_DWELL_MIN_MINOR && patch >= DKG_PHASE_DWELL_MIN_PATCH))))};
+        // A member that comes back on an older client flips its flag back, but a member we
+        // have already met is never dropped from the record.
+        LOCK(cs_dwell_aware);
+        g_dwell_aware[proTxHash] = aware;
     });
+
+    // Count DISTINCT members of the CURRENT quorum. Counting connections instead would be
+    // wrong twice over: an inbound and an outbound link to the same masternode are two CNodes
+    // but one member, and a member free to churn connections could buy itself votes.
+    int dwell_aware{0};
+    {
+        LOCK(cs_dwell_aware);
+        for (const auto& m : curSession->members) {
+            if (m->dmn->proTxHash == curSession->myProTxHash) {
+                ++dwell_aware; // ourselves, by construction
+                continue;
+            }
+            if (const auto it = g_dwell_aware.find(m->dmn->proTxHash);
+                it != g_dwell_aware.end() && it->second) {
+                ++dwell_aware;
+            }
+        }
+    }
 
     // minSize + margin keeps us clear of the smallest bitset that can still win a round. On a
     // quorum too small for that (regtest) require every member instead.
@@ -394,7 +428,7 @@ bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
     }
     // Logged in every mode, once per round: the survey is what an operator needs to see to
     // know why `auto` is or is not dwelling yet, and it is cheap next to a round of BLS.
-    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell %s for this round, dwell-aware members=%d needed=%d size=%d\n", __func__, params.name, quorumIndex, armed ? "armed" : "NOT armed", dwell_aware, needed, params.size);
+    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell %s for this round, dwell-aware members=%d of %d, needed=%d\n", __func__, params.name, quorumIndex, armed ? "armed" : "NOT armed", dwell_aware, (int)curSession->members.size(), needed);
     return armed;
 }
 
@@ -752,7 +786,8 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
 
     // Decided here, after the Initialized phase has had its blocks to bring the intra-quorum
     // connections up, so the version survey sees the real membership.
-    m_dwell_armed = ComputeDwellArmed(connman);
+    // Non-members judge nobody, so there is nothing to arm and no reason to survey.
+    m_dwell_armed = curSession->AreWeMember() && ComputeDwellArmed(connman);
 
     // Contribute
     auto fContributeStart = [this, &peerman]() { curSession->Contribute(pendingContributions, peerman); };
