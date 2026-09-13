@@ -322,7 +322,8 @@ void ActiveDKGSessionHandler::SleepBeforePhase(QuorumPhase curPhase, const uint2
 // without a dwell, a member whose contribution is merely still in flight is marked bad and
 // gets PoSe-punished for being slow rather than for misbehaving. This is why the dwell is
 // applied even when the chain has already jumped several phases ahead - that is exactly the
-// case it exists for. It is purely local scheduling and changes nothing on the wire.
+// case it exists for. It is purely local scheduling: no change to block validity and nothing
+// different on the wire.
 void ActiveDKGSessionHandler::WaitPhaseDwell(const uint256& expectedQuorumHash,
                                              const WhileWaitFunc& runWhileWaiting) const
 {
@@ -626,14 +627,13 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
         }
         curSession->VerifyAndComplain(connman, pendingComplaints, peerman);
     };
+    // The wait callback deliberately processes ONLY complaints. Once VerifyAndComplain has
+    // run, a contribution that arrives can no longer rescue its sender - bad is sticky - and
+    // the only path still open to it is the duplicate-contribution path, which condemns.
+    // Accepting late contributions here would therefore let a third party forge an exclusion
+    // we had already decided against, so this must stay exactly as v1.3.2.
     auto fComplainWait = [this, &connman, &peerman] {
-        // Keep accepting late contributions during Complain so that they are still recorded
-        // and can be reconciled, instead of being dropped on the floor.
-        const bool did_contributions{
-            ProcessPendingMessageBatch<CDKGContribution>(connman, m_sporkman, *curSession, pendingContributions, peerman, 8)};
-        const bool did_complaints{
-            ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8)};
-        return did_contributions || did_complaints;
+        return ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8);
     };
     HandlePhase(QuorumPhase::Complain, QuorumPhase::Justify, curQuorumHash, 0.05, fComplainStart, fComplainWait);
 
@@ -643,12 +643,10 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
         }
         curSession->VerifyAndJustify(pendingJustifications, peerman);
     };
+    // Only justifications, for the same reason: VerifyAndJustify runs once, so a complaint
+    // accepted after it can only ever add an entry that marks its target bad at commit time.
     auto fJustifyWait = [this, &connman, &peerman] {
-        const bool did_complaints{
-            ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8)};
-        const bool did_justifications{
-            ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8)};
-        return did_complaints || did_justifications;
+        return ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8);
     };
     HandlePhase(QuorumPhase::Justify, QuorumPhase::Commit, curQuorumHash, 0.05, fJustifyStart, fJustifyWait);
 
@@ -659,11 +657,8 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
         curSession->VerifyAndCommit(pendingPrematureCommitments, peerman);
     };
     auto fCommitWait = [this, &connman, &peerman] {
-        const bool did_justifications{
-            ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8)};
-        const bool did_commitments{ProcessPendingMessageBatch<CDKGPrematureCommitment>(
-            connman, m_sporkman, *curSession, pendingPrematureCommitments, peerman, 8)};
-        return did_justifications || did_commitments;
+        return ProcessPendingMessageBatch<CDKGPrematureCommitment>(connman, m_sporkman, *curSession,
+                                                                   pendingPrematureCommitments, peerman, 8);
     };
     HandlePhase(QuorumPhase::Commit, QuorumPhase::Finalize, curQuorumHash, 0.1, fCommitStart, fCommitWait);
 

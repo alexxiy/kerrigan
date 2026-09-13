@@ -218,7 +218,7 @@ bool CDKGSessionManager::GetComplaint(const uint256& hash, CDKGComplaint& ret) c
 
     for (const auto& [_, dkgType] : dkgSessionHandlers) {
         const auto dkgPhase = Assert(dkgType)->GetPhase();
-        if (dkgPhase < QuorumPhase::Contribute || dkgPhase > QuorumPhase::Justify) {
+        if (dkgPhase < QuorumPhase::Contribute || dkgPhase > QuorumPhase::Complain) {
             continue;
         }
         if (dkgType->GetComplaint(hash, ret)) {
@@ -235,7 +235,7 @@ bool CDKGSessionManager::GetJustification(const uint256& hash, CDKGJustification
 
     for (const auto& [_, dkgType] : dkgSessionHandlers) {
         const auto dkgPhase = Assert(dkgType)->GetPhase();
-        if (dkgPhase < QuorumPhase::Complain || dkgPhase > QuorumPhase::Commit) {
+        if (dkgPhase < QuorumPhase::Complain || dkgPhase > QuorumPhase::Justify) {
             continue;
         }
         if (dkgType->GetJustification(hash, ret)) {
