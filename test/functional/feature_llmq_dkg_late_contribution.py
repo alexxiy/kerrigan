@@ -35,6 +35,7 @@ validMembers and IS PoSe-punished.
 """
 
 import os
+import re
 import time
 
 from test_framework.test_framework import KerriganTestFramework
@@ -91,6 +92,12 @@ class LLMQDKGLateContribution(KerriganTestFramework):
         self.wait_for_quorum_phase(q, 1, 3, None, 0, mninfos, llmq_type_name=llmq_type_name)
         self.wait_for_quorum_connections(q, 2, mninfos, wait_proc=lambda: self.bump_mocktime(1),
                                          llmq_type_name=llmq_type_name)
+
+        # The auto-mode survey learns a member's client version from a live connection, and
+        # this test cuts one member off moments after the connections come up. Give every node
+        # a beat to record all three before that, so the arming line reflects the quorum
+        # rather than the order in which the framework happened to return from its RPCs.
+        time.sleep(2 * self.options.timeout_factor)
 
         self.log.info("Isolate one member BEFORE it can contribute")
         self.isolate_node(late_idx)
@@ -207,16 +214,22 @@ class LLMQDKGLateContribution(KerriganTestFramework):
         self.wait_until(check, timeout=timeout, sleep=0.5)
 
     def check_auto_arms(self, quorum_hash, mninfos):
-        """`auto` must arm on a quorum whose members are all this build.
+        """The per-round survey must count DISTINCT members, and all of them here.
 
-        Restarting the masternodes with -llmqdkgphasedwellmode=auto and mining another round
-        would double the runtime, so instead this drives ComputeDwellArmed through the one
-        input that decides it: every member of a 3-MN regtest quorum is this binary, so the
-        survey must count 3 of 3 and minSize + margin is capped to size. The nodes under test
-        run with mode=on, whose log line is emitted by the same function, so what is asserted
-        here is that the line is produced once per round with the full member count and that
-        the "needed" figure was capped to the quorum size rather than left at minSize + 4
-        (which no 3-member quorum could ever reach).
+        Every member of this 3-masternode quorum runs this build, and the cumulative record
+        the survey reads starts empty at process start, so an arming line that reports
+        3 of 3 proves both halves of the rule at once: the record was populated from live
+        peers during this process, and the count is of members rather than of connections.
+        A connection count would exceed the member count, since the framework leaves both an
+        inbound and an outbound link between each pair of masternodes.
+
+        It also checks the threshold was capped to the quorum size rather than left at
+        minSize + margin, which no 3-member quorum could ever reach.
+
+        Not checked here: that a restarted node re-learns the record. That needs a second
+        full DKG round, three more dwells, which is the dominant cost of this test, and the
+        property is already exercised by every run - the record is per process and empty at
+        startup, so the first round could not report 3 of 3 unless it had been re-learned.
         """
         armed_lines = []
         for mn in mninfos:
@@ -227,9 +240,29 @@ class LLMQDKGLateContribution(KerriganTestFramework):
                     armed_lines.append(line.strip())
         self.log.info("dwell arming lines seen: %d" % len(armed_lines))
         assert len(armed_lines) > 0, "ComputeDwellArmed never logged; the dwell decision is not per round"
+
+        counts = []
         for line in armed_lines:
-            # size=3 quorum: needed must have been capped to the quorum size, never minSize+4.
-            assert "needed=3 size=3" in line, "arming threshold was not capped to the quorum size: %s" % line
+            m = re.search(r"dwell-aware members=(\d+) of (\d+), needed=(\d+)", line)
+            assert m is not None, "arming line does not carry the survey: %s" % line
+            aware, members, needed = (int(g) for g in m.groups())
+            assert members == 3, "quorum did not have 3 members: %s" % line
+            # The bug this guards: counting CNode connections rather than distinct members.
+            # The framework leaves an inbound and an outbound link between each pair of
+            # masternodes, so a connection count would report more members than exist.
+            assert aware <= members, \
+                "survey counted more dwell-aware members than the quorum has: %s" % line
+            assert needed == members, \
+                "arming threshold was not capped to the quorum size: %s" % line
+            counts.append(aware)
+
+        # At least one node must have learned the whole quorum. The record is per process and
+        # empty at startup, so this is also what proves it gets populated from live peers.
+        # Not every node: a member that is unreachable when a node takes its survey is
+        # legitimately not counted, and this test isolates one member mid-round on purpose.
+        assert max(counts) == 3, \
+            "no node ever learned all 3 members were dwell-aware, counts were %s" % counts
+        self.log.info("dwell-aware counts per arming line: %s" % counts)
 
 
 if __name__ == "__main__":
