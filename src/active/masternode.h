@@ -24,6 +24,11 @@ class CDeterministicMNManager;
  */
 static constexpr bool DEFAULT_MASTERNODE_SELF_CHECK{false};
 
+/** Re-run the self-connect probe roughly once per hour of chain time. */
+static constexpr int MASTERNODE_SELF_CHECK_INTERVAL_BLOCKS{24};
+/** Do not repeat the self-check warning in the log more often than this. */
+static constexpr int64_t MASTERNODE_SELF_CHECK_LOG_INTERVAL{3600};
+
 class CActiveMasternodeManager
 {
 private:
@@ -44,6 +49,14 @@ private:
         SOME_ERROR,
     };
 
+    /** Outcome of the most recent self-connect probe. Never affects consensus or the MN list. */
+    enum class SelfCheckResult {
+        SKIPPED,    // chain does not require a routable external IP (regtest)
+        OK,         // we reached our own advertised address
+        FAILED,     // probe failed and -masternodeselfcheck=1 turned that into a hard error
+        STRICT_OFF, // probe failed but we keep running because -masternodeselfcheck=0
+    };
+
     mutable SharedMutex cs;
     COutPoint m_outpoint GUARDED_BY(cs);
     CService m_service GUARDED_BY(cs);
@@ -52,6 +65,9 @@ private:
     // Non-fatal operator-facing diagnostic. Unlike m_error it does not keep us out of DKG rounds.
     std::string m_warning GUARDED_BY(cs);
     int64_t m_warning_log_time GUARDED_BY(cs){0};
+    SelfCheckResult m_selfcheck GUARDED_BY(cs){SelfCheckResult::SKIPPED};
+    // Height of the last probe, -1 when we have not probed since becoming READY.
+    int m_selfcheck_height GUARDED_BY(cs){-1};
     uint256 m_protx_hash GUARDED_BY(cs);
 
 public:
@@ -70,6 +86,7 @@ public:
     std::string GetStateString() const;
     std::string GetStatus() const;
     [[nodiscard]] std::string GetWarning() const { READ_LOCK(cs); return m_warning; }
+    [[nodiscard]] std::string GetSelfCheckString() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     static bool IsValidNetAddr(const CService& addrIn);
 
@@ -86,6 +103,10 @@ public:
 
 private:
     void InitInternal(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    //! Probe our own advertised address. Returns false only when strict mode turns a failure fatal.
+    bool RunSelfCheck() EXCLUSIVE_LOCKS_REQUIRED(cs);
+    //! Re-probe if enough blocks have passed since the last probe. Never changes m_state.
+    void MaybeRunSelfCheck(int nHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs);
     bool GetLocalAddress(CService& addrRet) EXCLUSIVE_LOCKS_REQUIRED(cs);
 };
 
