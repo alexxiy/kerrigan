@@ -40,15 +40,27 @@ namespace llmq {
 /** How a single mined final commitment turned out for one masternode. Informational only. */
 struct DkgOutcome {
     Consensus::LLMQType llmqType{Consensus::LLMQType::LLMQ_NONE};
+    // Carried along so callers never have to look the params up again (and never hit a "type we
+    // just read out of Params() is unknown" branch that cannot happen).
+    std::string llmqTypeName;
     uint256 quorumHash;
+    uint256 minedBlockHash;
+    int quorumIndex{0};
     int height{-1};
-    bool member{false};
     bool valid{false};
 };
 
 /**
- * Describe the newest mined commitment of every active LLMQ type from the point of view of
- * proTxHash. Reads committed state only, touches no consensus rule and stores nothing.
+ * Whether a tip at this height could carry a freshly mined final commitment for any active LLMQ
+ * type. Pure height arithmetic, used to skip the scan on the blocks that cannot have one.
+ */
+bool IsPossibleCommitmentHeight(int nHeight);
+
+/**
+ * Describe the newest mined commitment in which proTxHash was a member, for every active LLMQ type
+ * and, for rotating types, every quorum index. Reads committed commitments only, touches no
+ * consensus rule and stores nothing. Outcomes we cannot date (no block index for the mined block)
+ * are dropped rather than reported with a placeholder height.
  */
 std::vector<DkgOutcome> GetRecentDkgOutcomes(const uint256& proTxHash, const CQuorumBlockProcessor& qblockman,
                                              CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
