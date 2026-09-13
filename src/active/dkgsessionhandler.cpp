@@ -476,14 +476,34 @@ void ActiveDKGSessionHandler::WaitPhaseDwell(QuorumPhase curPhase, const uint256
     const int64_t planned_ms{std::min<int64_t>(dwell_s * 1000 * remaining_dwells, budget_ms)};
     const int64_t this_dwell_ms{planned_ms / remaining_dwells};
     if (this_dwell_ms <= 0) {
-        LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell skipped, mining window is too close (blocks_left=%d)\n", __func__, params.name, quorumIndex, blocks_left);
+        LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell skipped, mining window is too close (blocks_left=%lld)\n", __func__, params.name, quorumIndex, static_cast<long long>(blocks_left));
         return;
     }
-    const int64_t end_time{prev_start_ms + this_dwell_ms};
+
+    // The dwell reads the mockable clock, unlike SleepBeforePhase which reads the system
+    // clock. SleepBeforePhase only staggers our own sends, so a test that fast-forwards
+    // mocktime should not skip it; the dwell decides WHEN WE JUDGE OTHER MEMBERS, which is
+    // the behaviour a functional test has to be able to drive, and driving it is the only way
+    // a 30 s production dwell can be exercised without 30 s of test runtime per phase.
+    const int64_t now_ms{GetTime<std::chrono::milliseconds>().count()};
+    // Deadline capped against both anchors. A clock that steps backwards - an NTP correction
+    // or a setmocktime in a test - would otherwise leave prev_start_ms far in the future and
+    // turn the dwell into a wait that only a new quorum hash could end.
+    const int64_t end_time{std::min(prev_start_ms + this_dwell_ms, now_ms + this_dwell_ms)};
 
     LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwelling up to %d ms before the next start handler (curPhase=%d, remaining=%d)\n", __func__, params.name, quorumIndex, end_time - GetTime<std::chrono::milliseconds>().count(), ToUnderlying(curPhase), remaining_dwells);
 
-    while (GetTime<std::chrono::milliseconds>().count() < end_time) {
+    while (true) {
+        const int64_t now{GetTime<std::chrono::milliseconds>().count()};
+        if (now >= end_time) {
+            break;
+        }
+        if (now < prev_start_ms) {
+            // The clock moved back behind the start of the previous handler, so the gap we
+            // are measuring no longer means anything. Judge now rather than wait blind.
+            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell cut short, clock stepped back behind the phase start\n", __func__, params.name, quorumIndex);
+            break;
+        }
         if (stopRequested) {
             LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due to stop/shutdown requested\n", __func__, params.name, quorumIndex);
             throw AbortPhaseException();
