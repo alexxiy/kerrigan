@@ -13,6 +13,7 @@
 #include <scheduler.h>
 #include <protocol.h>
 #include <util/check.h>
+#include <util/sock.h>
 #include <util/time.h>
 
 namespace {
@@ -173,13 +174,55 @@ void CActiveMasternodeManager::InitInternal(const CBlockIndex* pindex)
     m_state = MasternodeState::READY;
 }
 
-/** The blocking half of the self-check. Holds no lock: a TCP connect can take seconds. */
-static bool ProbeSelfConnect(const CService& service)
+/**
+ * The blocking half of the self-check. Holds no lock, and gives up after `timeout`.
+ *
+ * This duplicates the connect plumbing of netbase's ConnectToSocket() rather than using
+ * ConnectDirectly(), because that one only knows the global -timeout and adding a parameter to
+ * netbase is outside the scope of this change. All we need from the socket is reachable or not.
+ */
+static bool ProbeSelfConnect(const CService& service, std::chrono::milliseconds timeout)
 {
-    std::unique_ptr<Sock> sock{ConnectDirectly(service, /*manual_connection=*/true)};
-    const bool fConnected{sock && sock->IsSelectable(/*is_select=*/::g_socket_events_mode == SocketEventsMode::Select)};
-    sock = std::make_unique<Sock>(INVALID_SOCKET);
-    return fConnected;
+    const bool is_select{::g_socket_events_mode == SocketEventsMode::Select};
+
+    std::unique_ptr<Sock> sock{CreateSock(service.GetSAFamily())};
+    if (!sock) return false;
+
+    struct sockaddr_storage addr_storage;
+    socklen_t addr_len = sizeof(addr_storage);
+    if (!service.GetSockAddr(reinterpret_cast<struct sockaddr*>(&addr_storage), &addr_len)) return false;
+
+    if (sock->Connect(reinterpret_cast<struct sockaddr*>(&addr_storage), addr_len) != SOCKET_ERROR) {
+        return sock->IsSelectable(is_select);
+    }
+
+    const int connect_err{WSAGetLastError()};
+#ifdef WIN32
+    if (connect_err == WSAEISCONN) return sock->IsSelectable(is_select);
+#endif
+    // WSAEINVAL is here because some legacy versions of winsock use it (see netbase.cpp).
+    if (connect_err != WSAEINPROGRESS && connect_err != WSAEWOULDBLOCK && connect_err != WSAEINVAL) {
+        return false;
+    }
+
+    // The connect is being established asynchronously; wait for it, but not for long.
+    Sock::Event occurred{0};
+    if (!sock->Wait(timeout, Sock::RECV | Sock::SEND, SocketEventsParams{::g_socket_events_mode}, &occurred) ||
+        occurred == 0) {
+        LogPrint(BCLog::NET, "self-check connection attempt to %s timed out after %dms\n",
+                 service.ToStringAddrPort(), count_milliseconds(timeout));
+        return false;
+    }
+
+    // A successful wait does not mean a successful connect; the verdict is in SO_ERROR.
+    int sockerr{0};
+    socklen_t sockerr_len = sizeof(sockerr);
+    if (sock->GetSockOpt(SOL_SOCKET, SO_ERROR, (sockopt_arg_type)&sockerr, &sockerr_len) == SOCKET_ERROR) {
+        return false;
+    }
+    if (sockerr != 0) return false;
+
+    return sock->IsSelectable(is_select);
 }
 
 bool CActiveMasternodeManager::ApplySelfCheckResult(bool fConnected)
@@ -226,9 +269,11 @@ bool CActiveMasternodeManager::RunSelfCheck()
         return true;
     }
 
-    // Startup only, and the caller needs the verdict before it can decide READY vs SOME_ERROR,
-    // so this one stays synchronous. It does not run on the validation-interface thread.
-    return ApplySelfCheckResult(ProbeSelfConnect(m_service));
+    // The caller needs the verdict before it can decide READY vs SOME_ERROR, so this one stays
+    // synchronous and runs under cs. It is reached from init and from UpdatedBlockTip (through
+    // reset()), so it can run on the validation-interface thread; the probe's own 2 s deadline is
+    // what keeps that bounded.
+    return ApplySelfCheckResult(ProbeSelfConnect(m_service, MASTERNODE_SELF_CHECK_TIMEOUT));
 }
 
 void CActiveMasternodeManager::RunScheduledSelfCheck()
@@ -240,8 +285,11 @@ void CActiveMasternodeManager::RunScheduledSelfCheck()
     }
 
     // Connect outside cs: every RPC that reads our state would otherwise block for the whole
-    // connect timeout, and so would the next block notification.
-    const bool fConnected{ProbeSelfConnect(service)};
+    // connect timeout. This still runs on the scheduler thread, which is the same thread that
+    // dispatches validation-interface callbacks (init.cpp hands it to
+    // RegisterBackgroundSignalScheduler), so the probe's 2 s deadline is what keeps block
+    // notifications from queueing up behind it.
+    const bool fConnected{ProbeSelfConnect(service, MASTERNODE_SELF_CHECK_TIMEOUT)};
 
     LOCK(cs);
     m_selfcheck_queued = false;
@@ -274,9 +322,11 @@ void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
     // ISP moving us behind CGNAT). Keep the warning current, but never take a running masternode
     // out of its quorums over it; the operator decides what to do with the warning.
     //
-    // We are on the validation-interface thread here, so hand the blocking connect to the
-    // scheduler. The scheduler is stopped long before this object is destroyed, so capturing
-    // this is safe.
+    // We are on the validation-interface thread here, holding nothing, so hand the blocking
+    // connect to the scheduler. That does not move it off the signal thread (the scheduler IS the
+    // background signal dispatcher), but it does get it out from under cs, and the probe is bounded
+    // to MASTERNODE_SELF_CHECK_TIMEOUT. The scheduler is stopped long before this object is
+    // destroyed, so capturing this is safe.
     if (CScheduler* scheduler{m_scheduler.load(std::memory_order_acquire)}) {
         scheduler->scheduleFromNow([this] { RunScheduledSelfCheck(); }, std::chrono::milliseconds{0});
     } else {

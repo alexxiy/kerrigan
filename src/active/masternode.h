@@ -13,6 +13,7 @@
 #include <validationinterface.h>
 
 #include <atomic>
+#include <chrono>
 #include <string>
 
 class CConnman;
@@ -30,6 +31,12 @@ static constexpr bool DEFAULT_MASTERNODE_SELF_CHECK{false};
 static constexpr int MASTERNODE_SELF_CHECK_INTERVAL_BLOCKS{24};
 /** Do not repeat the self-check warning in the log more often than this. */
 static constexpr int64_t MASTERNODE_SELF_CHECK_LOG_INTERVAL{3600};
+/**
+ * Deadline for the self-connect probe. netbase's ConnectDirectly() honours the global -timeout
+ * (5 s by default, and an operator can raise it), which is far too long to spend on the scheduler
+ * thread for a diagnostic, so the probe uses its own bound.
+ */
+static constexpr std::chrono::milliseconds MASTERNODE_SELF_CHECK_TIMEOUT{2000};
 
 class CActiveMasternodeManager
 {
