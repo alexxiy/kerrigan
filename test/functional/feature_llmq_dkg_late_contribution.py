@@ -35,6 +35,7 @@ validMembers and IS PoSe-punished.
 """
 
 import os
+import time
 
 from test_framework.test_framework import KerriganTestFramework
 from test_framework.util import assert_equal
@@ -107,7 +108,16 @@ class LLMQDKGLateContribution(KerriganTestFramework):
         for mn in mninfos[1:]:
             self.connect_nodes(late_idx, mn.nodeIdx)
         self.sync_blocks(all_nodes)
-        self.wait_for_quorum_phase(q, 3, 3, None, 0, mninfos, llmq_type_name=llmq_type_name, timeout=120)
+        # Real time, with the mock clock frozen, so the late member can reconnect, catch up,
+        # contribute, and have its inv fetched before anything advances the dwell. After the
+        # v1.3.3 fix the pre-judge drain is the ONLY thing that records a late contribution -
+        # nothing processes the queue once VerifyAndComplain has run - so a contribution that
+        # arrives after the dwell expires is correctly ignored, and the test must not create
+        # that situation itself.
+        self.log.info("Settling: letting the late contribution cross the wire in real time")
+        time.sleep(5 * self.options.timeout_factor)
+
+        self.wait_phase(q, 3, 3, None, 0, mninfos, llmq_type_name=llmq_type_name)
 
         self.log.info("Phase 3 (complain): the two judges must see all 3 contributions")
         if not self.options.no_dwell:
@@ -118,24 +128,24 @@ class LLMQDKGLateContribution(KerriganTestFramework):
             # artifact of how the test delays the message, not of the scenario being fixed -
             # on a real burst the slow member receives everything and is only slow to be
             # heard.
-            self.wait_for_quorum_phase(q, 3, 2, "receivedContributions", 3, mninfos[1:],
-                                       llmq_type_name=llmq_type_name, timeout=120)
+            self.wait_phase(q, 3, 2, "receivedContributions", 3, mninfos[1:],
+                            llmq_type_name=llmq_type_name)
 
         self.log.info("Phase 4 (justify)")
         self.move_blocks(all_nodes, 2)
-        self.wait_for_quorum_phase(q, 4, 3, None, 0, mninfos, llmq_type_name=llmq_type_name, timeout=180)
+        self.wait_phase(q, 4, 3, None, 0, mninfos, llmq_type_name=llmq_type_name, timeout=180)
 
         self.log.info("Phase 5 (commit)")
         self.move_blocks(all_nodes, 2)
         # 2, for the same reason as above: the late member never saw the other two
         # contributions, so it abstains. The two judges are what this test is about, and
         # their agreeing premature commitments are what decides validMembers below.
-        self.wait_for_quorum_phase(q, 5, 2, "receivedPrematureCommitments", 2, mninfos[1:],
-                                   llmq_type_name=llmq_type_name, timeout=180)
+        self.wait_phase(q, 5, 2, "receivedPrematureCommitments", 2, mninfos[1:],
+                        llmq_type_name=llmq_type_name, timeout=180)
 
         self.log.info("Phase 6 (mining) and the final commitment")
         self.move_blocks(all_nodes, 2)
-        self.wait_for_quorum_phase(q, 6, 2, None, 0, mninfos[1:], llmq_type_name=llmq_type_name, timeout=180)
+        self.wait_phase(q, 6, 2, None, 0, mninfos[1:], llmq_type_name=llmq_type_name, timeout=180)
         self.wait_for_quorum_commitment(q, mninfos[1:], llmq_type=100, timeout=60)
         self.bump_mocktime(1)
         self.nodes[0].getblocktemplate()
@@ -161,6 +171,40 @@ class LLMQDKGLateContribution(KerriganTestFramework):
                 assert not check_punished(self.nodes[0], mn)
                 assert not check_banned(self.nodes[0], mn)
 
+
+    def wait_phase(self, quorum_hash, phase, member_count, check_messages, check_count, mninfos,
+                   llmq_type_name="llmq_test", timeout=120):
+        """wait_for_quorum_phase, but advancing the mock clock while it waits.
+
+        The dwell is measured on the node's mockable clock. That is deliberate (it is what
+        lets a 40 s dwell cost a couple of seconds of test runtime), but it means a test that
+        merely sleeps would wait forever: regtest nodes run under -mocktime and their clock
+        only moves when we move it. Bumping here is therefore both the mechanism and the
+        assertion - if the dwell ever stopped using the mockable clock, these waits would
+        start taking the full 40 s of wall time per phase.
+        """
+        def check():
+            # One second per poll, not a jump: the dwell ends the moment the mock clock says
+            # so, and the message this test is about has to reach the judges before that. A
+            # coarse fast-forward would race the very exchange under test.
+            self.bump_mocktime(1, nodes=self.nodes)
+            seen = 0
+            for mn in mninfos:
+                for qs in mn.get_node(self).quorum("dkgstatus")["session"]:
+                    if qs["llmqType"] != llmq_type_name:
+                        continue
+                    qstatus = qs["status"]
+                    if qstatus["quorumHash"] != quorum_hash:
+                        continue
+                    if qstatus["phase"] != phase:
+                        return False
+                    if check_messages is not None and qstatus[check_messages] < check_count:
+                        return False
+                    seen += 1
+                    break
+            return seen >= member_count
+
+        self.wait_until(check, timeout=timeout, sleep=0.5)
 
     def check_auto_arms(self, quorum_hash, mninfos):
         """`auto` must arm on a quorum whose members are all this build.
