@@ -420,8 +420,8 @@ std::set<NodeId> BatchVerifyMessageSigs(CDKGSession& session, const std::vector<
     return ret;
 }
 
-static void RelayInvToParticipants(const CDKGSession& session, const CConnman& connman, PeerManager& peerman,
-                                   const CInv& inv)
+static void RelayInvToParticipants(const CDKGSession& session, const CConnman& connman,
+                                   const CSporkManager& sporkman, PeerManager& peerman, const CInv& inv)
 {
     CDKGLogger logger(session, __func__, __LINE__);
     std::stringstream ss;
@@ -436,10 +436,21 @@ static void RelayInvToParticipants(const CDKGSession& session, const CConnman& c
                  connman.HasMasternodeQuorumNodes(session.GetType(), session.BlockIndex()->GetBlockHash()),
                  session.BlockIndex()->GetBlockHash().ToString(), session.ProTx().ToString().substr(0, 4), ss.str());
 
+    // With SPORK_21 (all members connected) on, every member of this quorum is already an
+    // intra-quorum peer of ours, so there is no reason to make the inv walk the 5-in/5-out
+    // relay ring hop by hop: hand it to every connected member directly. Under a block burst
+    // those saved hops are the difference between a message that lands before the next phase
+    // start handler judges its sender and one that does not. Message handling is unchanged,
+    // so v1.3.1 and v1.3.2 peers simply learn about the message sooner.
+    const bool all_members_connected{IsAllMembersConnectedEnabled(session.GetType(), sporkman)};
+
     std::stringstream ss2;
     connman.ForEachNode([&](const CNode* pnode) {
-        if (pnode->qwatch ||
-            (!pnode->GetVerifiedProRegTxHash().IsNull() && (relayMembers.count(pnode->GetVerifiedProRegTxHash()) != 0))) {
+        const uint256 proTxHash{pnode->GetVerifiedProRegTxHash()};
+        const bool is_relay_member{!proTxHash.IsNull() && relayMembers.count(proTxHash) != 0};
+        const bool is_connected_member{all_members_connected && !proTxHash.IsNull() &&
+                                       session.GetMember(proTxHash) != nullptr};
+        if (pnode->qwatch || is_relay_member || is_connected_member) {
             peerman.PushInventory(pnode->GetId(), inv);
         }
 
@@ -454,8 +465,8 @@ static void RelayInvToParticipants(const CDKGSession& session, const CConnman& c
 }
 
 template <typename Message>
-bool ProcessPendingMessageBatch(const CConnman& connman, CDKGSession& session, CDKGPendingMessages& pendingMessages,
-                                PeerManager& peerman, size_t maxCount)
+bool ProcessPendingMessageBatch(const CConnman& connman, const CSporkManager& sporkman, CDKGSession& session,
+                                CDKGPendingMessages& pendingMessages, PeerManager& peerman, size_t maxCount)
 {
     auto msgs = pendingMessages.PopAndDeserializeMessages<Message>(maxCount);
     if (msgs.empty()) {
@@ -506,7 +517,7 @@ bool ProcessPendingMessageBatch(const CConnman& connman, CDKGSession& session, C
         }
         const std::optional<CInv> inv = session.ReceiveMessage(*p.second);
         if (inv) {
-            RelayInvToParticipants(session, connman, peerman, *inv);
+            RelayInvToParticipants(session, connman, sporkman, peerman, *inv);
         }
     }
 
@@ -565,7 +576,7 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     // Contribute
     auto fContributeStart = [this, &peerman]() { curSession->Contribute(pendingContributions, peerman); };
     auto fContributeWait = [this, &connman, &peerman] {
-        return ProcessPendingMessageBatch<CDKGContribution>(connman, *curSession, pendingContributions, peerman, 8);
+        return ProcessPendingMessageBatch<CDKGContribution>(connman, m_sporkman, *curSession, pendingContributions, peerman, 8);
     };
     HandlePhase(QuorumPhase::Contribute, QuorumPhase::Complain, curQuorumHash, 0.05, fContributeStart, fContributeWait);
 
@@ -575,7 +586,7 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     // being pushed across the phase boundary; judging without draining marks their senders
     // bad for a message we are holding in our own hands.
     auto fComplainStart = [this, &connman, &peerman]() {
-        while (ProcessPendingMessageBatch<CDKGContribution>(connman, *curSession, pendingContributions, peerman, 8)) {
+        while (ProcessPendingMessageBatch<CDKGContribution>(connman, m_sporkman, *curSession, pendingContributions, peerman, 8)) {
         }
         curSession->VerifyAndComplain(connman, pendingComplaints, peerman);
     };
@@ -583,39 +594,39 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
         // Keep accepting late contributions during Complain so that they are still recorded
         // and can be reconciled, instead of being dropped on the floor.
         const bool did_contributions{
-            ProcessPendingMessageBatch<CDKGContribution>(connman, *curSession, pendingContributions, peerman, 8)};
+            ProcessPendingMessageBatch<CDKGContribution>(connman, m_sporkman, *curSession, pendingContributions, peerman, 8)};
         const bool did_complaints{
-            ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8)};
+            ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8)};
         return did_contributions || did_complaints;
     };
     HandlePhase(QuorumPhase::Complain, QuorumPhase::Justify, curQuorumHash, 0.05, fComplainStart, fComplainWait);
 
     // Justify
     auto fJustifyStart = [this, &connman, &peerman]() {
-        while (ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8)) {
+        while (ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8)) {
         }
         curSession->VerifyAndJustify(pendingJustifications, peerman);
     };
     auto fJustifyWait = [this, &connman, &peerman] {
         const bool did_complaints{
-            ProcessPendingMessageBatch<CDKGComplaint>(connman, *curSession, pendingComplaints, peerman, 8)};
+            ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8)};
         const bool did_justifications{
-            ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8)};
+            ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8)};
         return did_complaints || did_justifications;
     };
     HandlePhase(QuorumPhase::Justify, QuorumPhase::Commit, curQuorumHash, 0.05, fJustifyStart, fJustifyWait);
 
     // Commit
     auto fCommitStart = [this, &connman, &peerman]() {
-        while (ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8)) {
+        while (ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8)) {
         }
         curSession->VerifyAndCommit(pendingPrematureCommitments, peerman);
     };
     auto fCommitWait = [this, &connman, &peerman] {
         const bool did_justifications{
-            ProcessPendingMessageBatch<CDKGJustification>(connman, *curSession, pendingJustifications, peerman, 8)};
+            ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8)};
         const bool did_commitments{ProcessPendingMessageBatch<CDKGPrematureCommitment>(
-            connman, *curSession, pendingPrematureCommitments, peerman, 8)};
+            connman, m_sporkman, *curSession, pendingPrematureCommitments, peerman, 8)};
         return did_justifications || did_commitments;
     };
     HandlePhase(QuorumPhase::Commit, QuorumPhase::Finalize, curQuorumHash, 0.1, fCommitStart, fCommitWait);
