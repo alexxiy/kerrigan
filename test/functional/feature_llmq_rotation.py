@@ -241,6 +241,30 @@ class LLMQQuorumRotationTest(KerriganTestFramework):
         assert_equal(rpc_qr_info["mnListDiffAtHMinus2C"]["baseBlockHash"], rpc_qr_info["mnListDiffAtHMinus3C"]["blockHash"])
         assert_equal(rpc_qr_info["mnListDiffAtHMinus3C"]["baseBlockHash"], genesis_blockhash)
 
+        self.log.info("Test that DKG outcomes are reported for every rotating quorum index")
+        # A rotating type runs one DKG per quorum index. Reporting only the first index would hide
+        # an exclusion at any other one, so require that some member saw an outcome at index != 0.
+        # feature_masternode_status_dkg.py covers the non-rotating case; this topology is the only
+        # one in the suite that mines llmq_test_dip0024 at all.
+        seen_indexes = set()
+        for mn in self.mninfo:
+            with open(mn.get_node(self).debug_log_path, encoding='utf-8') as f:
+                for line in f:
+                    if "DKG: masternode" not in line or llmq_type_name not in line:
+                        continue
+                    seen_indexes.add(int(line.split("qi[")[1].split("]")[0]))
+        assert_greater_than_or_equal(len(seen_indexes), 2)
+        assert 0 in seen_indexes
+        assert max(seen_indexes) > 0
+
+        self.log.info("Test that masternode status reports lastDkg with all keys present")
+        for mn in self.mninfo:
+            last_dkg = mn.get_node(self).masternode("status")["lastDkg"]
+            assert_equal(sorted(last_dkg.keys()),
+                         sorted(["llmqType", "quorumHash", "quorumIndex", "height", "member", "valid"]))
+            assert_equal(last_dkg["member"], True)
+            assert_greater_than_or_equal(last_dkg["height"], 0)
+
     def test_getmnlistdiff_quorums(self, baseBlockHash, blockHash, baseQuorumList, expectedDeleted, expectedNew, testQuorumsCLSigs = True):
         d = self.test_getmnlistdiff_base(baseBlockHash, blockHash, testQuorumsCLSigs)
 

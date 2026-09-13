@@ -159,35 +159,86 @@ void CActiveMasternodeManager::InitInternal(const CBlockIndex* pindex)
 
     // Check socket connectivity
     LogPrintf("CActiveMasternodeManager::Init -- Checking inbound connection to '%s'\n", m_service.ToStringAddrPort());
-    std::unique_ptr<Sock> sock{ConnectDirectly(m_service, /*manual_connection=*/true)};
-    bool fConnected{sock && sock->IsSelectable(/*is_select=*/::g_socket_events_mode == SocketEventsMode::Select)};
-    sock = std::make_unique<Sock>(INVALID_SOCKET);
-    if (!fConnected && Params().RequireRoutableExternalIP()) {
-        if (m_selfcheck_strict) {
-            m_state = MasternodeState::SOME_ERROR;
-            m_error = "Could not connect to " + m_service.ToStringAddrPort();
-            LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", m_error);
-            return;
-        }
-        // A failed self-connect only proves that WE cannot reach our own external address from
-        // behind our own router (no NAT hairpinning), which says nothing about reachability from
-        // the internet. Refusing to become READY here keeps the masternode out of every DKG round
-        // and gets it PoSe-banned for a router quirk, so continue and surface a warning instead.
-        m_warning = strprintf("Could not connect to own address %s; continuing. Verify that port %d is reachable "
-                              "from the internet, or the masternode will be PoSe-punished.",
-                              m_service.ToStringAddrPort(), m_service.GetPort());
-        // InitInternal is re-run on block tips, so rate-limit the log line to once per hour.
-        if (const int64_t now{GetTime()}; now - m_warning_log_time >= 3600) {
-            m_warning_log_time = now;
-            LogPrintf("CActiveMasternodeManager::Init -- WARNING: %s\n", m_warning);
-        }
-    } else {
-        m_warning.clear();
+    if (!RunSelfCheck()) {
+        m_state = MasternodeState::SOME_ERROR;
+        m_error = "Could not connect to " + m_service.ToStringAddrPort();
+        LogPrintf("CActiveMasternodeManager::Init -- ERROR: %s\n", m_error);
+        return;
     }
+    m_selfcheck_height = pindex->nHeight;
 
     m_protx_hash = dmn->proTxHash;
     m_outpoint = dmn->collateralOutpoint;
     m_state = MasternodeState::READY;
+}
+
+bool CActiveMasternodeManager::RunSelfCheck()
+{
+    AssertLockHeld(cs);
+
+    if (!Params().RequireRoutableExternalIP()) {
+        // regtest and friends accept any address, so there is nothing meaningful to probe.
+        m_selfcheck = SelfCheckResult::SKIPPED;
+        m_warning.clear();
+        return true;
+    }
+
+    std::unique_ptr<Sock> sock{ConnectDirectly(m_service, /*manual_connection=*/true)};
+    const bool fConnected{sock && sock->IsSelectable(/*is_select=*/::g_socket_events_mode == SocketEventsMode::Select)};
+    sock = std::make_unique<Sock>(INVALID_SOCKET);
+
+    if (fConnected) {
+        m_selfcheck = SelfCheckResult::OK;
+        m_warning.clear();
+        return true;
+    }
+
+    if (m_selfcheck_strict) {
+        m_selfcheck = SelfCheckResult::FAILED;
+        return false;
+    }
+
+    // A failed self-connect only proves that WE cannot reach our own external address from behind
+    // our own router (no NAT hairpinning), which says nothing about reachability from the internet.
+    // Refusing to run keeps the masternode out of every DKG round and gets it PoSe-banned for a
+    // router quirk, so continue and surface a warning instead.
+    m_selfcheck = SelfCheckResult::STRICT_OFF;
+    m_warning = strprintf("Could not connect to own address %s; continuing. Verify that port %d is reachable "
+                          "from the internet, or the masternode will be PoSe-punished.",
+                          m_service.ToStringAddrPort(), m_service.GetPort());
+    if (const int64_t now{GetTime()}; now - m_warning_log_time >= MASTERNODE_SELF_CHECK_LOG_INTERVAL) {
+        m_warning_log_time = now;
+        LogPrintf("CActiveMasternodeManager -- WARNING: %s\n", m_warning);
+    }
+    return true;
+}
+
+void CActiveMasternodeManager::MaybeRunSelfCheck(int nHeight)
+{
+    LOCK(cs);
+    if (m_state != MasternodeState::READY) return;
+    if (m_selfcheck_height >= 0 && nHeight - m_selfcheck_height < MASTERNODE_SELF_CHECK_INTERVAL_BLOCKS) return;
+    m_selfcheck_height = nHeight;
+    // The probe at startup is only a snapshot: port forwards die long afterwards (router reboot,
+    // ISP moving us behind CGNAT). Keep the warning current, but never take a running masternode
+    // out of its quorums over it; the operator decides what to do with the warning.
+    RunSelfCheck();
+}
+
+std::string CActiveMasternodeManager::GetSelfCheckString() const
+{
+    READ_LOCK(cs);
+    switch (m_selfcheck) {
+    case SelfCheckResult::SKIPPED:
+        return "skipped";
+    case SelfCheckResult::OK:
+        return "ok";
+    case SelfCheckResult::FAILED:
+        return "failed";
+    case SelfCheckResult::STRICT_OFF:
+        return "strict-off";
+    } // no default case, so the compiler can warn about missing cases
+    assert(false);
 }
 
 void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload)
@@ -225,6 +276,8 @@ void CActiveMasternodeManager::UpdatedBlockTip(const CBlockIndex* pindexNew, con
             // MN IP changed
             return reset(MasternodeState::PROTX_IP_CHANGED);
         }
+
+        MaybeRunSelfCheck(pindexNew->nHeight);
     } else {
         // MN might have (re)appeared with a new ProTx or we've found some peers
         // and figured out our local address

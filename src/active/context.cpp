@@ -104,35 +104,60 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
     if (recovery::IsQuarantined()) return;
 
     nodeman->UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload);
-    LogDkgOutcomes(pindexNew);
+    UpdateDkgOutcomes(pindexNew);
     ehf_sighandler->UpdatedBlockTip(pindexNew);
     gov_signer->UpdatedBlockTip(pindexNew);
     qdkgsman->UpdatedBlockTip(pindexNew, fInitialDownload);
     qman_handler->UpdatedBlockTip(pindexNew, fInitialDownload);
 }
 
-void ActiveContext::LogDkgOutcomes(const CBlockIndex* pindexNew)
+void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew)
 {
     const uint256 proTxHash{nodeman->GetProTxHash()};
     if (proTxHash.IsNull()) return;
 
-    for (const auto& outcome : llmq::GetRecentDkgOutcomes(proTxHash, m_qblockman, m_dmnman, m_qsnapman, m_chainman,
-                                                          pindexNew)) {
-        // Only a member of the quorum can be excluded from it, so nobody else needs the line.
-        if (!outcome.member) continue;
-        if (auto& logged = m_logged_dkg_outcomes[outcome.llmqType]; logged != outcome.quorumHash) {
-            logged = outcome.quorumHash;
-        } else {
-            continue;
-        }
+    // A commitment can only be mined inside a type's mining window. Once the cache has been primed
+    // every other tip, including every extra tip of a burst, costs a single height comparison.
+    if (WITH_LOCK(m_dkg_outcomes_mutex, return m_dkg_outcomes_primed) &&
+        !llmq::IsPossibleCommitmentHeight(pindexNew->nHeight)) {
+        return;
+    }
 
-        const auto& llmq_params_opt = Params().GetLLMQ(outcome.llmqType);
+    const auto outcomes{llmq::GetRecentDkgOutcomes(proTxHash, m_qblockman, m_dmnman, m_qsnapman, m_chainman,
+                                                   pindexNew)};
+
+    LOCK(m_dkg_outcomes_mutex);
+    // The first scan only fills the cache: those rounds ended before we were watching, and
+    // announcing them at startup would read as fresh news.
+    const bool priming{!m_dkg_outcomes_primed};
+    m_dkg_outcomes_primed = true;
+
+    for (const auto& outcome : outcomes) {
+        auto& cached = m_dkg_outcomes[{outcome.llmqType, outcome.quorumIndex}];
+        // Same commitment as last time, or an older one because a reorg moved us back: say nothing.
+        if (cached.minedBlockHash == outcome.minedBlockHash || outcome.height <= cached.height) continue;
+        cached = outcome;
+        if (priming) continue;
+
         // Operators currently learn about an exclusion only when the PoSe ban lands, which is too
         // late to correct anything, so say it out loud at the default log level.
-        LogPrintf("DKG: masternode %s was %s in quorum %s %s mined at height %d%s\n", proTxHash.ToString(),
-                  outcome.valid ? "valid" : "EXCLUDED",
-                  llmq_params_opt.has_value() ? std::string{llmq_params_opt->name} : "unknown",
-                  outcome.quorumHash.ToString(), outcome.height,
+        LogPrintf("DKG: masternode %s was %s in quorum %s %s qi[%d] mined at height %d%s\n", proTxHash.ToString(),
+                  outcome.valid ? "valid" : "EXCLUDED", outcome.llmqTypeName, outcome.quorumHash.ToString(),
+                  outcome.quorumIndex, outcome.height,
                   outcome.valid ? "" : " (PoSe penalty applied by the network)");
     }
+}
+
+std::optional<llmq::DkgOutcome> ActiveContext::GetLastDkgOutcome() const
+{
+    LOCK(m_dkg_outcomes_mutex);
+    const llmq::DkgOutcome* newest{nullptr};
+    for (const auto& [key, outcome] : m_dkg_outcomes) {
+        if (outcome.height < 0) continue;
+        if (newest == nullptr || outcome.height > newest->height) {
+            newest = &outcome;
+        }
+    }
+    if (newest == nullptr) return std::nullopt;
+    return *newest;
 }

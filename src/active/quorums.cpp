@@ -18,6 +18,8 @@
 
 #include <chain.h>
 #include <chainparams.h>
+#include <util/irange.h>
+#include <util/ranges.h>
 #include <logging.h>
 #include <net.h>
 #include <netmessagemaker.h>
@@ -26,6 +28,22 @@
 #include <cxxtimer.hpp>
 
 namespace llmq {
+namespace {
+//! Mirrors the mining window test in CQuorumBlockProcessor (src/llmq/blockprocessor.cpp).
+bool IsPossibleCommitmentHeight(const Consensus::LLMQParams& params, int nHeight)
+{
+    const int cycle_start{nHeight - (nHeight % params.dkgInterval)};
+    return nHeight >= cycle_start + params.dkgMiningWindowStart && nHeight <= cycle_start + params.dkgMiningWindowEnd;
+}
+} // anonymous namespace
+
+bool IsPossibleCommitmentHeight(int nHeight)
+{
+    return ranges::any_of(Params().GetConsensus().llmqs, [&](const auto& params) {
+        return IsPossibleCommitmentHeight(params, nHeight);
+    });
+}
+
 std::vector<DkgOutcome> GetRecentDkgOutcomes(const uint256& proTxHash, const CQuorumBlockProcessor& qblockman,
                                              CDeterministicMNManager& dmnman, CQuorumSnapshotManager& qsnapman,
                                              const ChainstateManager& chainman, const CBlockIndex* pindex)
@@ -33,33 +51,49 @@ std::vector<DkgOutcome> GetRecentDkgOutcomes(const uint256& proTxHash, const CQu
     std::vector<DkgOutcome> ret;
     if (pindex == nullptr || proTxHash.IsNull()) return ret;
 
-    for (const auto& [llmqType, quorums] : qblockman.GetMinedAndActiveCommitmentsUntilBlock(pindex)) {
-        // The most recent quorum of a type is first, see GetMinedAndActiveCommitmentsUntilBlock.
-        if (quorums.empty()) continue;
-        const CBlockIndex* pQuorumBaseBlockIndex = quorums.front();
-
-        const auto [qc, minedBlockHash] = qblockman.GetMinedCommitment(llmqType,
-                                                                       pQuorumBaseBlockIndex->GetBlockHash());
-        if (minedBlockHash.IsNull()) continue;
-
-        DkgOutcome outcome;
-        outcome.llmqType = llmqType;
-        outcome.quorumHash = pQuorumBaseBlockIndex->GetBlockHash();
-        if (const CBlockIndex* pMinedIndex = WITH_LOCK(::cs_main,
-                                                       return chainman.m_blockman.LookupBlockIndex(minedBlockHash));
-            pMinedIndex != nullptr) {
-            outcome.height = pMinedIndex->nHeight;
+    for (const auto& params : Params().GetConsensus().llmqs) {
+        // A rotating type runs one DKG per quorum index, each with its own base block and its own
+        // validMembers set, so looking at a single entry would hide an exclusion at any other index.
+        std::vector<const CBlockIndex*> quorum_base_indexes;
+        if (IsQuorumRotationEnabled(params, pindex)) {
+            for (const auto quorumIndex : irange::range(params.signingActiveQuorumCount)) {
+                if (auto base = qblockman.GetLastMinedCommitmentsByQuorumIndexUntilBlock(params.type, pindex,
+                                                                                        quorumIndex, /*cycle=*/0);
+                    base.has_value()) {
+                    quorum_base_indexes.emplace_back(base.value());
+                }
+            }
+        } else {
+            quorum_base_indexes = qblockman.GetMinedCommitmentsUntilBlock(params.type, pindex, /*maxCount=*/1);
         }
 
-        const auto members = utils::GetAllQuorumMembers(llmqType, {dmnman, qsnapman, chainman,
-                                                                   pQuorumBaseBlockIndex});
-        for (size_t i = 0; i < members.size(); ++i) {
-            if (members[i]->proTxHash != proTxHash) continue;
-            outcome.member = true;
-            outcome.valid = i < qc.validMembers.size() && qc.validMembers[i];
-            break;
+        for (const CBlockIndex* pQuorumBaseBlockIndex : quorum_base_indexes) {
+            const auto [qc, minedBlockHash] = qblockman.GetMinedCommitment(params.type,
+                                                                           pQuorumBaseBlockIndex->GetBlockHash());
+            if (minedBlockHash.IsNull()) continue;
+
+            // Without the mined block index there is no height to report, and an invented one is
+            // worse than staying quiet.
+            const CBlockIndex* pMinedIndex{WITH_LOCK(::cs_main,
+                                                     return chainman.m_blockman.LookupBlockIndex(minedBlockHash))};
+            if (pMinedIndex == nullptr) continue;
+
+            const auto members = utils::GetAllQuorumMembers(params.type, {dmnman, qsnapman, chainman,
+                                                                          pQuorumBaseBlockIndex});
+            for (size_t i = 0; i < members.size(); ++i) {
+                if (members[i]->proTxHash != proTxHash) continue;
+                DkgOutcome outcome;
+                outcome.llmqType = params.type;
+                outcome.llmqTypeName = std::string{params.name};
+                outcome.quorumHash = pQuorumBaseBlockIndex->GetBlockHash();
+                outcome.minedBlockHash = minedBlockHash;
+                outcome.quorumIndex = qc.quorumIndex;
+                outcome.height = pMinedIndex->nHeight;
+                outcome.valid = i < qc.validMembers.size() && qc.validMembers[i];
+                ret.emplace_back(std::move(outcome));
+                break;
+            }
         }
-        ret.emplace_back(outcome);
     }
     return ret;
 }

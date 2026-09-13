@@ -5,14 +5,18 @@
 #ifndef BITCOIN_ACTIVE_CONTEXT_H
 #define BITCOIN_ACTIVE_CONTEXT_H
 
+#include <active/quorums.h>
 #include <llmq/options.h>
 #include <llmq/types.h>
 
+#include <sync.h>
 #include <uint256.h>
 #include <validationinterface.h>
 
 #include <map>
 #include <memory>
+#include <optional>
+#include <utility>
 
 class CActiveMasternodeManager;
 class CBLSSecretKey;
@@ -60,8 +64,11 @@ private:
     llmq::CQuorumBlockProcessor& m_qblockman;
     llmq::CQuorumSnapshotManager& m_qsnapman;
     const ChainstateManager& m_chainman;
-    // Newest mined commitment already reported per LLMQ type, so bursts do not repeat a line.
-    std::map<Consensus::LLMQType, uint256> m_logged_dkg_outcomes;
+    // Newest mined commitment seen per (LLMQ type, quorum index). Filled in UpdatedBlockTip so the
+    // RPC never has to rescan, and used to suppress repeats within a burst or after a reorg.
+    mutable Mutex m_dkg_outcomes_mutex;
+    std::map<std::pair<Consensus::LLMQType, int>, llmq::DkgOutcome> m_dkg_outcomes GUARDED_BY(m_dkg_outcomes_mutex);
+    bool m_dkg_outcomes_primed GUARDED_BY(m_dkg_outcomes_mutex){false};
 
 public:
     ActiveContext() = delete;
@@ -82,13 +89,16 @@ public:
     void Start(CConnman& connman, PeerManager& peerman);
     void Stop();
 
+    //! Newest mined commitment this masternode was a member of, or nullopt when there is none.
+    [[nodiscard]] std::optional<llmq::DkgOutcome> GetLastDkgOutcome() const EXCLUSIVE_LOCKS_REQUIRED(!m_dkg_outcomes_mutex);
+
 protected:
     // CValidationInterface
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) override;
 
 private:
     // Tell the operator how the DKG rounds this masternode took part in actually ended.
-    void LogDkgOutcomes(const CBlockIndex* pindexNew);
+    void UpdateDkgOutcomes(const CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(!m_dkg_outcomes_mutex);
 
 public:
     /*

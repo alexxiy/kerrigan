@@ -546,13 +546,19 @@ static RPCHelpMan masternode_status()
                 CDeterministicMNState::GetJsonHelp(/*key=*/"dmnState", /*optional=*/true),
                 {RPCResult::Type::STR, "state", "Masternode state (e.g. READY, POSE_BANNED, WAITING_FOR_PROTX)"},
                 {RPCResult::Type::STR, "warning", "Non-fatal operator warning, empty string when there is none"},
-                {RPCResult::Type::OBJ, "lastDkg", "Newest mined commitment of a quorum we are a member of, empty when there is none",
+                {RPCResult::Type::STR, "selfCheck", "Result of the last probe of our own advertised address: "
+                                                    "\"ok\", \"failed\" (probe failed with -masternodeselfcheck=1, "
+                                                    "which is a hard error), \"strict-off\" (probe failed but we keep "
+                                                    "running) or \"skipped\" (chain does not require a routable IP)"},
+                {RPCResult::Type::OBJ, "lastDkg", "Newest mined commitment of a quorum we were a member of. All keys are "
+                                                  "present; they are null when we were not a member of any recent quorum",
                 {
-                    {RPCResult::Type::STR, "llmqType", /*optional=*/true, "LLMQ type name"},
-                    {RPCResult::Type::STR_HEX, "quorumHash", /*optional=*/true, "Quorum base block hash"},
-                    {RPCResult::Type::NUM, "height", /*optional=*/true, "Height the commitment was mined at"},
-                    {RPCResult::Type::BOOL, "member", /*optional=*/true, "Whether we were a member of the quorum"},
-                    {RPCResult::Type::BOOL, "valid", /*optional=*/true, "Whether the commitment counted us as valid"},
+                    {RPCResult::Type::STR, "llmqType", "LLMQ type name, or null"},
+                    {RPCResult::Type::STR_HEX, "quorumHash", "Quorum base block hash, or null"},
+                    {RPCResult::Type::NUM, "quorumIndex", "Quorum index within the rotation cycle, or null"},
+                    {RPCResult::Type::NUM, "height", "Height the commitment was mined at, or null"},
+                    {RPCResult::Type::BOOL, "member", "Whether we were a member of the quorum, or null"},
+                    {RPCResult::Type::BOOL, "valid", "Whether the commitment counted us as valid, or null"},
                 }},
             }
         },
@@ -581,29 +587,23 @@ static RPCHelpMan masternode_status()
     // Pool software and monitoring tools use "state" (machine-readable enum).
     mnObj.pushKV("state", mn_activeman.GetStateString());
     mnObj.pushKV("warning", mn_activeman.GetWarning());
+    mnObj.pushKV("selfCheck", mn_activeman.GetSelfCheckString());
 
     // Report how the last DKG round we took part in actually ended. An operator otherwise has no
-    // way to notice repeated exclusions before the PoSe ban lands.
+    // way to notice repeated exclusions before the PoSe ban lands. The scan itself happens on new
+    // tips, so this reads a cache and never walks the commitment database.
     UniValue lastDkg(UniValue::VOBJ);
-    if (node.llmq_ctx != nullptr && node.dmnman != nullptr && node.chainman != nullptr) {
-        const CBlockIndex* pindex{WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Tip())};
-        const llmq::DkgOutcome* newest{nullptr};
-        const auto outcomes{llmq::GetRecentDkgOutcomes(mn_activeman.GetProTxHash(),
-                                                       *node.llmq_ctx->quorum_block_processor, *node.dmnman,
-                                                       *node.llmq_ctx->qsnapman, *node.chainman, pindex)};
-        for (const auto& outcome : outcomes) {
-            if (!outcome.member) continue;
-            if (newest == nullptr || outcome.height > newest->height) {
-                newest = &outcome;
-            }
-        }
-        if (newest != nullptr) {
-            const auto& llmq_params_opt = Params().GetLLMQ(newest->llmqType);
-            lastDkg.pushKV("llmqType", llmq_params_opt.has_value() ? std::string{llmq_params_opt->name} : "unknown");
-            lastDkg.pushKV("quorumHash", newest->quorumHash.ToString());
-            lastDkg.pushKV("height", newest->height);
-            lastDkg.pushKV("member", newest->member);
-            lastDkg.pushKV("valid", newest->valid);
+    if (const auto outcome{node.active_ctx->GetLastDkgOutcome()}; outcome.has_value()) {
+        lastDkg.pushKV("llmqType", outcome->llmqTypeName);
+        lastDkg.pushKV("quorumHash", outcome->quorumHash.ToString());
+        lastDkg.pushKV("quorumIndex", outcome->quorumIndex);
+        lastDkg.pushKV("height", outcome->height);
+        lastDkg.pushKV("member", true);
+        lastDkg.pushKV("valid", outcome->valid);
+    } else {
+        // Always emit the keys so consumers can read them without probing for their existence.
+        for (const auto& key : {"llmqType", "quorumHash", "quorumIndex", "height", "member", "valid"}) {
+            lastDkg.pushKV(key, UniValue(UniValue::VNULL));
         }
     }
     mnObj.pushKV("lastDkg", lastDkg);
