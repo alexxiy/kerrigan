@@ -106,7 +106,12 @@ public:
     std::string GetStateString() const;
     std::string GetStatus() const;
     [[nodiscard]] std::string GetWarning() const { READ_LOCK(cs); return m_warning; }
-    /** Hand us the node scheduler so the periodic probe stays off the validation thread. */
+    /**
+     * Hand us the node scheduler so the periodic probe runs outside cs and under its own
+     * deadline. It is the same thread that dispatches validation-interface callbacks
+     * (init.cpp registers it as the background signal scheduler), so this does not move the
+     * probe to another thread; MASTERNODE_SELF_CHECK_TIMEOUT is what bounds it.
+     */
     void SetScheduler(CScheduler& scheduler) { m_scheduler.store(&scheduler, std::memory_order_release); }
     [[nodiscard]] std::string GetSelfCheckString() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
