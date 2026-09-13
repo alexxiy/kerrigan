@@ -48,6 +48,41 @@ class MasternodeStatusDkgTest(KerriganTestFramework):
         with open(node.debug_log_path, encoding='utf-8') as f:
             return f.read()
 
+    def mine_quorum_without(self, offline_mn):
+        """Mine a quorum that one member misses entirely.
+
+        llmq_test is size 3 / minSize 2, so the two members that are still on the network form a
+        commitment and the absent one is excluded from it. Modelled on mine_quorum_less_checks in
+        feature_llmq_simplepose.py: the point here is the catch-up, not the DKG accounting.
+        """
+        online = [mn for mn in self.mninfo if mn is not offline_mn]
+        nodes = [self.nodes[0]] + [mn.get_node(self) for mn in online]
+        good = len(online)
+
+        skip_count = 24 - (self.nodes[0].getblockcount() % 24)
+        if skip_count != 0:
+            self.bump_mocktime(skip_count, nodes=nodes)
+            self.generate(self.nodes[0], skip_count, sync_fun=lambda: self.sync_blocks(nodes))
+
+        q = self.nodes[0].getbestblockhash()
+        self.wait_for_quorum_phase(q, 1, good, None, 0, online)
+        self.move_blocks(nodes, 2)
+        self.wait_for_quorum_phase(q, 2, good, "receivedContributions", good, online)
+        self.move_blocks(nodes, 2)
+        self.wait_for_quorum_phase(q, 3, good, None, 0, online)
+        self.move_blocks(nodes, 2)
+        self.wait_for_quorum_phase(q, 4, good, None, 0, online)
+        self.move_blocks(nodes, 2)
+        self.wait_for_quorum_phase(q, 5, good, "receivedPrematureCommitments", good, online)
+        self.move_blocks(nodes, 2)
+        self.wait_for_quorum_phase(q, 6, good, None, 0, online)
+        self.wait_for_quorum_commitment(q, online)
+
+        self.bump_mocktime(1, nodes=nodes)
+        self.nodes[0].getblocktemplate()  # this calls CreateNewBlock
+        self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_blocks(nodes))
+        return q, nodes
+
     def run_test(self):
         self.nodes[0].sporkupdate("SPORK_17_QUORUM_DKG_ENABLED", 0)
         self.wait_for_sporks_same()
@@ -111,6 +146,39 @@ class MasternodeStatusDkgTest(KerriganTestFramework):
             assert_equal(spam, [])
             assert "llmq type llmq_test_dip0024 cannot form:" in log, \
                 "missing the once-per-day summary for llmq_test_dip0024"
+
+        self.log.info("a commitment that arrives mid-burst is still reported")
+        # UpdatedBlockTip fires once per ActivateBestChain batch. A node that has been away for a
+        # while connects the blocks it missed in batches, so it can be told about a tip well past
+        # the mining window without ever being notified at the height the commitment was mined at.
+        burst_mn = self.mninfo[0]
+        burst_node = burst_mn.get_node(self)
+        marker = len(self.read_log(burst_node))
+
+        burst_node.setnetworkactive(False)
+        self.wait_until(lambda: burst_node.getconnectioncount() == 0)
+
+        quorum_hash, online_nodes = self.mine_quorum_without(burst_mn)
+
+        # Park the tip outside every mining window (llmq_test is [10, 18] and llmq_test_dip0024 is
+        # [12, 20] of a 24 block cycle) before letting it back in.
+        skip = 0
+        while 10 <= (self.nodes[0].getblockcount() + skip) % 24 <= 20:
+            skip += 1
+        if skip > 0:
+            self.bump_mocktime(skip, nodes=online_nodes)
+            self.generate(self.nodes[0], skip, sync_fun=lambda: self.sync_blocks(online_nodes))
+
+        burst_node.setnetworkactive(True)
+        self.connect_nodes(burst_mn.nodeIdx, 0)
+        self.bump_mocktime(1)
+        self.wait_until(lambda: burst_node.getblockcount() == self.nodes[0].getblockcount())
+
+        # It was a member of that quorum and missed the whole round, so it was excluded from the
+        # commitment. That is exactly the news an operator needs, and it must survive the catch-up.
+        expected = "DKG: masternode %s was EXCLUDED in quorum llmq_test %s" % (burst_mn.proTxHash, quorum_hash)
+        self.wait_until(lambda: expected in self.read_log(burst_node)[marker:])
+        assert_equal(burst_node.masternode("status")["lastDkg"]["valid"], False)
 
 
 if __name__ == '__main__':

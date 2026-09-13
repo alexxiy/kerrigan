@@ -102,8 +102,8 @@ protected:
 
 private:
     // Tell the operator how the DKG rounds this masternode took part in actually ended.
-    void UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_dkg_outcomes_mutex);
+    void UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
+                           const uint256& proTxHash) EXCLUSIVE_LOCKS_REQUIRED(!m_dkg_outcomes_mutex);
 
 public:
     /*
