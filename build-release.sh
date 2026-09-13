@@ -104,10 +104,17 @@ build_linux() {
     # Strip build-tree paths from DWARF debug strings and Rust source refs so
     # binaries do not leak the operator's home directory. Remaps $SRCDIR -> /build
     # and cargo home -> /cargo in every compiled object.
+    # Deliberately NOT exported: build_depends() for the NEXT target would inherit them, and
+    # depends/ treats a caller-supplied CFLAGS/CXXFLAGS as a full override of its own host
+    # defaults, so the packages would rebuild without -O2/-std=c++20 (arm64 .text doubled).
     local remap="-ffile-prefix-map=$SRCDIR=/build -fmacro-prefix-map=$SRCDIR=/build -fdebug-prefix-map=$SRCDIR=/build"
-    export CFLAGS="${CFLAGS:-} $remap"
-    export CXXFLAGS="${CXXFLAGS:-} $remap"
-    export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$SRCDIR=/build --remap-path-prefix=$HOME/.cargo=/cargo"
+    local target_cflags="${CFLAGS:-} $remap"
+    local target_cxxflags="${CXXFLAGS:-} $remap"
+    # configure is precious about CFLAGS/CXXFLAGS/LDFLAGS, so those reach make through the
+    # generated Makefiles. RUSTFLAGS is not a configure variable in this tree: src/Makefile.am
+    # expands $(RUSTFLAGS) into RUST_ENV_VARS, which make takes from its own environment, so it
+    # has to be set on the make invocation instead.
+    local target_rustflags="${RUSTFLAGS:-} --remap-path-prefix=$SRCDIR=/build --remap-path-prefix=$HOME/.cargo=/cargo"
 
     # aarch64 cross-links leak ~135k internal C++/Rust symbols into .dynsym
     # (strip cannot remove dynamic symbols): 2.5x larger binaries for nothing.
@@ -128,13 +135,15 @@ build_linux() {
     export BDB_CFLAGS="-I$prefix/include"
 
     CONFIG_SITE="$prefix/share/config.site" \
+    CFLAGS="$target_cflags" \
+    CXXFLAGS="$target_cxxflags" \
     LDFLAGS="${LDFLAGS:-} $target_ldflags" ./configure \
         --prefix="$prefix" \
         --disable-tests --disable-bench \
         --disable-online-rust \
         --enable-wallet --with-incompatible-bdb --with-sqlite=yes \
         ${configure_host:+--host="$configure_host"}
-    make -j"$JOBS"
+    RUSTFLAGS="$target_rustflags" make -j"$JOBS"
 
     test -f src/kerrigand     || error "kerrigand missing for $tag"
     test -f src/qt/kerrigan-qt || error "kerrigan-qt missing for $tag"
