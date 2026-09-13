@@ -13,6 +13,7 @@
 #include <governance/signing.h>
 #include <instantsend/instantsend.h>
 #include <instantsend/signing.h>
+#include <llmq/blockprocessor.h>
 #include <llmq/context.h>
 #include <llmq/debug.h>
 #include <llmq/dkgsessionmgr.h>
@@ -35,6 +36,10 @@ ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman
                              bool quorums_recovery, bool quorums_watch, bool selfcheck_strict) :
     m_isman{isman},
     m_qman{qman},
+    m_dmnman{dmnman},
+    m_qblockman{qblockman},
+    m_qsnapman{qsnapman},
+    m_chainman{chainman},
     nodeman{std::make_unique<CActiveMasternodeManager>(connman, dmnman, operator_sk, selfcheck_strict)},
     dkgdbgman{std::make_unique<llmq::CDKGDebugManager>()},
     qdkgsman{std::make_unique<llmq::CDKGSessionManager>(dmnman, qsnapman, chainman, sporkman, db_params, quorums_watch)},
@@ -97,9 +102,35 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
     if (recovery::IsQuarantined()) return;
 
     nodeman->UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload);
+    LogDkgOutcomes(pindexNew);
     ehf_sighandler->UpdatedBlockTip(pindexNew);
     gov_signer->UpdatedBlockTip(pindexNew);
     qdkgsman->UpdatedBlockTip(pindexNew, fInitialDownload);
     qman_handler->UpdatedBlockTip(pindexNew, fInitialDownload);
 }
 
+void ActiveContext::LogDkgOutcomes(const CBlockIndex* pindexNew)
+{
+    const uint256 proTxHash{nodeman->GetProTxHash()};
+    if (proTxHash.IsNull()) return;
+
+    for (const auto& outcome : llmq::GetRecentDkgOutcomes(proTxHash, m_qblockman, m_dmnman, m_qsnapman, m_chainman,
+                                                          pindexNew)) {
+        // Only a member of the quorum can be excluded from it, so nobody else needs the line.
+        if (!outcome.member) continue;
+        if (auto& logged = m_logged_dkg_outcomes[outcome.llmqType]; logged != outcome.quorumHash) {
+            logged = outcome.quorumHash;
+        } else {
+            continue;
+        }
+
+        const auto& llmq_params_opt = Params().GetLLMQ(outcome.llmqType);
+        // Operators currently learn about an exclusion only when the PoSe ban lands, which is too
+        // late to correct anything, so say it out loud at the default log level.
+        LogPrintf("DKG: masternode %s was %s in quorum %s %s mined at height %d%s\n", proTxHash.ToString(),
+                  outcome.valid ? "valid" : "EXCLUDED",
+                  llmq_params_opt.has_value() ? std::string{llmq_params_opt->name} : "unknown",
+                  outcome.quorumHash.ToString(), outcome.height,
+                  outcome.valid ? "" : " (PoSe penalty applied by the network)");
+    }
+}

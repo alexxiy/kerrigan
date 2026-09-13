@@ -6,9 +6,12 @@
 #define BITCOIN_ACTIVE_CONTEXT_H
 
 #include <llmq/options.h>
+#include <llmq/types.h>
 
+#include <uint256.h>
 #include <validationinterface.h>
 
+#include <map>
 #include <memory>
 
 class CActiveMasternodeManager;
@@ -53,6 +56,12 @@ struct ActiveContext final : public CValidationInterface {
 private:
     llmq::CInstantSendManager& m_isman;
     llmq::CQuorumManager& m_qman;
+    CDeterministicMNManager& m_dmnman;
+    llmq::CQuorumBlockProcessor& m_qblockman;
+    llmq::CQuorumSnapshotManager& m_qsnapman;
+    const ChainstateManager& m_chainman;
+    // Newest mined commitment already reported per LLMQ type, so bursts do not repeat a line.
+    std::map<Consensus::LLMQType, uint256> m_logged_dkg_outcomes;
 
 public:
     ActiveContext() = delete;
@@ -75,6 +84,10 @@ public:
 protected:
     // CValidationInterface
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) override;
+
+private:
+    // Tell the operator how the DKG rounds this masternode took part in actually ended.
+    void LogDkgOutcomes(const CBlockIndex* pindexNew);
 
 public:
     /*
