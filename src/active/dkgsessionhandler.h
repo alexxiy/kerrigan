@@ -118,6 +118,7 @@ private:
     void WaitForNewQuorum(const uint256& oldQuorumHash) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor,
                           const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    void RefreshDwellAwareness(const CConnman& connman) const;
     bool ComputeDwellArmed(const CConnman& connman) const;
     void WaitPhaseDwell(QuorumPhase curPhase, const uint256& expectedQuorumHash,
                         const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);

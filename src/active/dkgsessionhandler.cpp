@@ -370,11 +370,14 @@ static Uint256HashMap<bool> g_dwell_aware GUARDED_BY(cs_dwell_aware);
 // round produces no commitment and everybody who was dropped takes a PoSe penalty anyway. So
 // in `auto` we arm only when the quorum is overwhelmingly on a client that dwells too, and we
 // re-decide every round so the network converges on its own as operators upgrade.
-bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
+// Fold whatever verified masternode peers we can see right now into the record. Called more
+// than once per round: a member can be connected while the quorum is being brought up and
+// gone again by the time the survey runs, and the whole point of the record is that such a
+// member is still counted.
+void ActiveDKGSessionHandler::RefreshDwellAwareness(const CConnman& connman) const
 {
-    // Refresh the record from whatever peers we can see right now. Every verified masternode
-    // peer is recorded, not just members of this quorum, because the next round draws a
-    // different membership from the same network.
+    // Every verified masternode peer is recorded, not just members of this quorum, because
+    // the next round draws a different membership from the same network.
     connman.ForEachNode([&](const CNode* pnode) {
         const uint256 proTxHash{pnode->GetVerifiedProRegTxHash()};
         if (proTxHash.IsNull()) {
@@ -392,6 +395,11 @@ bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
         LOCK(cs_dwell_aware);
         g_dwell_aware[proTxHash] = aware;
     });
+}
+
+bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
+{
+    RefreshDwellAwareness(connman);
 
     // Count DISTINCT members of the CURRENT quorum. Counting connections instead would be
     // wrong twice over: an inbound and an outbound link to the same masternode are two CNodes
@@ -782,7 +790,22 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
                                          curSession->myProTxHash);
     }
 
-    WaitForNextPhase(QuorumPhase::Initialized, QuorumPhase::Contribute, curQuorumHash);
+    // First look, while the connections we just asked for are coming up. The arming decision
+    // is still taken once, below, but a member seen only during this window is remembered.
+    RefreshDwellAwareness(connman);
+
+    // ... and keep looking for the rest of the Initialized phase. MNAUTH completes at its own
+    // pace on each link, so a single snapshot systematically undercounts: whichever members
+    // had not yet identified themselves at that instant are invisible, and on a network where
+    // that instant differs per node the arming decision would differ per node too. Sampling
+    // throughout costs one walk of the peer list per 100 ms of a phase that happens once an
+    // hour. If a burst crosses the boundary immediately this simply does not run, which is
+    // why the two explicit calls around it stay.
+    WaitForNextPhase(QuorumPhase::Initialized, QuorumPhase::Contribute, curQuorumHash,
+                     [this, &connman] {
+                         RefreshDwellAwareness(connman);
+                         return false; // keep the 100 ms cadence of the wait loop
+                     });
 
     // Decided here, after the Initialized phase has had its blocks to bring the intra-quorum
     // connections up, so the version survey sees the real membership.
