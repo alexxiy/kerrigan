@@ -600,10 +600,12 @@ static void RelayInvToParticipants(const CDKGSession& session, const CConnman& c
             peerman.PushInventory(pnode->GetId(), inv);
         }
 
-        if (pnode->GetVerifiedProRegTxHash().IsNull()) {
+        if (proTxHash.IsNull()) {
             logger.Batch("node[%d:%s] not mn", pnode->GetId(), pnode->m_addr_name);
-        } else if (relayMembers.count(pnode->GetVerifiedProRegTxHash()) == 0) {
-            ss2 << pnode->GetVerifiedProRegTxHash().ToString().substr(0, 4) << " | ";
+        } else if (!is_relay_member && !is_connected_member) {
+            // Only peers we did NOT push to belong in this list. Before the one-hop relay
+            // existed every non-ring peer was skipped, so the two sets coincided.
+            ss2 << proTxHash.ToString().substr(0, 4) << " | ";
         }
     });
     logger.Batch("forMember[%s] NOTrelayMembers[%s]", session.ProTx().ToString().substr(0, 4), ss2.str());
