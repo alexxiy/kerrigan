@@ -634,7 +634,14 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
         for entry in os.listdir(os.path.join(new_data_dir, self.chain)):
             if entry not in ['chainstate', 'blocks', 'indexes', 'evodb']:
-                os.remove(os.path.join(new_data_dir, self.chain, entry))
+                # Kerrigan datadirs also carry directories (e.g. sapling/) that
+                # os.remove() cannot delete; every dynamically added masternode
+                # died here.
+                entry_path = os.path.join(new_data_dir, self.chain, entry)
+                if os.path.isdir(entry_path):
+                    shutil.rmtree(entry_path)
+                else:
+                    os.remove(entry_path)
 
         write_config(os.path.join(new_data_dir, "kerrigan.conf"),
                      n=mnidx, chain=self.chain, disable_autoconnect=self.disable_autoconnect)
