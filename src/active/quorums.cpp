@@ -20,6 +20,9 @@
 #include <chainparams.h>
 #include <util/irange.h>
 #include <util/ranges.h>
+
+#include <algorithm>
+#include <limits>
 #include <logging.h>
 #include <net.h>
 #include <netmessagemaker.h>
@@ -42,6 +45,26 @@ bool IsPossibleCommitmentHeight(int nHeight)
     return ranges::any_of(Params().GetConsensus().llmqs, [&](const auto& params) {
         return IsPossibleCommitmentHeight(params, nHeight);
     });
+}
+
+bool SpanCanCarryCommitment(int from, int to)
+{
+    if (to < 0) return false;
+    const int first{std::max(from + 1, 0)};
+    if (first > to) return false;
+
+    // A span at least as long as the shortest DKG cycle covers a whole mining window whatever the
+    // offsets are, and it also keeps the loop below bounded by one cycle.
+    int shortest_interval{std::numeric_limits<int>::max()};
+    for (const auto& params : Params().GetConsensus().llmqs) {
+        shortest_interval = std::min(shortest_interval, params.dkgInterval);
+    }
+    if (to - first + 1 >= shortest_interval) return true;
+
+    for (int height = first; height <= to; ++height) {
+        if (IsPossibleCommitmentHeight(height)) return true;
+    }
+    return false;
 }
 
 std::vector<DkgOutcome> GetRecentDkgOutcomes(const uint256& proTxHash, const CQuorumBlockProcessor& qblockman,

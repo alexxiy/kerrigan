@@ -70,6 +70,9 @@ private:
     mutable Mutex m_dkg_outcomes_mutex;
     std::map<std::pair<Consensus::LLMQType, int>, llmq::DkgOutcome> m_dkg_outcomes GUARDED_BY(m_dkg_outcomes_mutex);
     bool m_dkg_outcomes_primed GUARDED_BY(m_dkg_outcomes_mutex){false};
+    // Highest tip we have already considered, so a burst is judged on the span it connected and
+    // not only on the height it happened to stop at.
+    int m_last_scanned_height GUARDED_BY(m_dkg_outcomes_mutex){-1};
 
 public:
     ActiveContext() = delete;
@@ -99,7 +102,8 @@ protected:
 
 private:
     // Tell the operator how the DKG rounds this masternode took part in actually ended.
-    void UpdateDkgOutcomes(const CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(!m_dkg_outcomes_mutex);
+    void UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_dkg_outcomes_mutex);
 
 public:
     /*

@@ -23,6 +23,8 @@
 #include <recovery/recovery.h>
 #include <util/check.h>
 #include <validation.h>
+
+#include <algorithm>
 #include <validationinterface.h>
 
 ActiveContext::ActiveContext(CBLSWorker& bls_worker, ChainstateManager& chainman, CConnman& connman,
@@ -106,23 +108,29 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
     if (recovery::IsQuarantined()) return;
 
     nodeman->UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload);
-    UpdateDkgOutcomes(pindexNew);
+    UpdateDkgOutcomes(pindexNew, pindexFork);
     ehf_sighandler->UpdatedBlockTip(pindexNew);
     gov_signer->UpdatedBlockTip(pindexNew);
     qdkgsman->UpdatedBlockTip(pindexNew, fInitialDownload);
     qman_handler->UpdatedBlockTip(pindexNew, fInitialDownload);
 }
 
-void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew)
+void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork)
 {
     const uint256 proTxHash{nodeman->GetProTxHash()};
     if (proTxHash.IsNull()) return;
 
-    // A commitment can only be mined inside a type's mining window. Once the cache has been primed
-    // every other tip, including every extra tip of a burst, costs a single height comparison.
-    if (WITH_LOCK(m_dkg_outcomes_mutex, return m_dkg_outcomes_primed) &&
-        !llmq::IsPossibleCommitmentHeight(pindexNew->nHeight)) {
-        return;
+    // A commitment can only be mined inside a type's mining window, so most tips need no scan.
+    // The window has to be tested against every height this notification brought us, though:
+    // UpdatedBlockTip fires once per ActivateBestChain batch, and a burst that connects the
+    // commitment plus a few more blocks lands on a tip well past the window.
+    {
+        LOCK(m_dkg_outcomes_mutex);
+        const int fork_height{pindexFork != nullptr ? pindexFork->nHeight : -1};
+        const int from{std::max(m_last_scanned_height, fork_height)};
+        const bool primed{m_dkg_outcomes_primed};
+        m_last_scanned_height = pindexNew->nHeight;
+        if (primed && !llmq::SpanCanCarryCommitment(from, pindexNew->nHeight)) return;
     }
 
     const auto outcomes{llmq::GetRecentDkgOutcomes(proTxHash, m_qblockman, m_dmnman, m_qsnapman, m_chainman,

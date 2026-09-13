@@ -1,13 +1,7 @@
 #include "hash.h"
 #include "streams.h"
-#include <cstddef>
-#include <cstdint>
-#include <exception>
+#include "rust/cxx.h"
 #include <memory>
-#include <new>
-#include <string>
-#include <type_traits>
-#include <utility>
 
 #ifdef __GNUC__
 #pragma GCC diagnostic ignored "-Wmissing-declarations"
@@ -19,20 +13,6 @@
 
 namespace rust {
 inline namespace cxxbridge1 {
-// #include "rust/cxx.h"
-
-#ifndef CXXBRIDGE1_IS_COMPLETE
-#define CXXBRIDGE1_IS_COMPLETE
-namespace detail {
-namespace {
-template <typename T, typename = std::size_t>
-struct is_complete : std::false_type {};
-template <typename T>
-struct is_complete<T, decltype(sizeof(T))> : std::true_type {};
-} // namespace
-} // namespace detail
-#endif // CXXBRIDGE1_IS_COMPLETE
-
 namespace repr {
 struct PtrLen final {
   void *ptr;

@@ -9,7 +9,7 @@
 /* #undef AC_APPLE_UNIVERSAL_BUILD */
 
 /* Version Build */
-#define CLIENT_VERSION_BUILD 0
+#define CLIENT_VERSION_BUILD 3
 
 /* Version is release */
 #define CLIENT_VERSION_IS_RELEASE true
@@ -18,7 +18,7 @@
 #define CLIENT_VERSION_MAJOR 1
 
 /* Minor version */
-#define CLIENT_VERSION_MINOR 0
+#define CLIENT_VERSION_MINOR 3
 
 /* Copyright holder(s) before %s replacement */
 #define COPYRIGHT_HOLDERS "The %s developers"
@@ -293,7 +293,7 @@
 #define PACKAGE_NAME "Kerrigan"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "Kerrigan 1.0.0"
+#define PACKAGE_STRING "Kerrigan 1.3.3"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "kerrigan"
@@ -302,7 +302,7 @@
 #define PACKAGE_URL "https://github.com/kerrigan-network/kerrigan"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "1.0.0"
+#define PACKAGE_VERSION "1.3.3"
 
 /* Define to necessary symbol if this constant uses a non-standard name on
    your system. */
@@ -332,7 +332,7 @@
 #define STRERROR_R_CHAR_P 1
 
 /* Define if BDB support should be compiled in */
-/* #undef USE_BDB */
+#define USE_BDB 1
 
 /* Define if dbus support should be compiled in */
 /* #undef USE_DBUS */

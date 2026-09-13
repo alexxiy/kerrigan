@@ -1,7 +1,5 @@
 #pragma once
-#include <array>
-#include <cstddef>
-#include <cstdint>
+#include "rust/cxx.h"
 
 #ifdef __clang__
 #pragma clang diagnostic push

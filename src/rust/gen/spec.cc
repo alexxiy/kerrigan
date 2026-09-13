@@ -1,9 +1,4 @@
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <exception>
-#include <new>
-#include <utility>
+#include "rust/cxx.h"
 
 #ifdef __GNUC__
 #pragma GCC diagnostic ignored "-Wshadow"
@@ -14,34 +9,6 @@
 
 namespace rust {
 inline namespace cxxbridge1 {
-// #include "rust/cxx.h"
-
-namespace {
-template <typename T>
-class impl;
-} // namespace
-
-#ifndef CXXBRIDGE1_RUST_ERROR
-#define CXXBRIDGE1_RUST_ERROR
-class Error final : public std::exception {
-public:
-  Error(const Error &);
-  Error(Error &&) noexcept;
-  ~Error() noexcept override;
-
-  Error &operator=(const Error &) &;
-  Error &operator=(Error &&) & noexcept;
-
-  const char *what() const noexcept override;
-
-private:
-  Error() noexcept = default;
-  friend impl<Error>;
-  const char *msg;
-  std::size_t len;
-};
-#endif // CXXBRIDGE1_RUST_ERROR
-
 namespace repr {
 struct PtrLen final {
   void *ptr;
