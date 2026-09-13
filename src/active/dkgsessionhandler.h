@@ -115,6 +115,9 @@ private:
                           const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void WaitPhaseDwell(const uint256& expectedQuorumHash, const WhileWaitFunc& runWhileWaiting) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
+    template <typename Message>
+    void DrainPendingMessages(const CConnman& connman, CDKGPendingMessages& pendingMessages, PeerManager& peerman,
+                              const uint256& expectedQuorumHash) EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase, const uint256& expectedQuorumHash,
                      double randomSleepFactor, const StartPhaseFunc& startPhaseFunc,
                      const WhileWaitFunc& runWhileWaiting) EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);

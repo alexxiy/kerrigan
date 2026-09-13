@@ -561,6 +561,33 @@ bool ProcessPendingMessageBatch(const CConnman& connman, const CSporkManager& sp
     return true;
 }
 
+// Empty a pending queue before the start handler judges on what it holds. The loop is
+// bounded: a well-behaved quorum can produce at most two messages per member (the second
+// one being the duplicate that condemns its sender), so anything beyond that is either a
+// flood or a bug, and either way we must not spin here while the round moves on. Every
+// pass re-checks the same abort conditions the sleep loops use.
+template <typename Message>
+void ActiveDKGSessionHandler::DrainPendingMessages(const CConnman& connman, CDKGPendingMessages& pendingMessages,
+                                                   PeerManager& peerman, const uint256& expectedQuorumHash)
+{
+    const int max_batches{params.size * 2 / 8 + 1};
+    for (int i = 0; i < max_batches; ++i) {
+        if (stopRequested) {
+            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due to stop/shutdown requested\n", __func__, params.name, quorumIndex);
+            throw AbortPhaseException();
+        }
+        auto [_, _quorumHash] = GetPhaseAndQuorumHash();
+        if (_quorumHash != expectedQuorumHash) {
+            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due unexpected expectedQuorumHash change\n", __func__, params.name, quorumIndex);
+            throw AbortPhaseException();
+        }
+        if (!ProcessPendingMessageBatch<Message>(connman, m_sporkman, *curSession, pendingMessages, peerman, 8)) {
+            return;
+        }
+    }
+    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - drain stopped at the %d batch cap, queue still has messages\n", __func__, params.name, quorumIndex, max_batches);
+}
+
 void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& peerman)
 {
     WaitForNextPhase(std::nullopt, QuorumPhase::Initialized);
@@ -622,9 +649,8 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     // After a block burst the queue routinely holds contributions that arrived while we were
     // being pushed across the phase boundary; judging without draining marks their senders
     // bad for a message we are holding in our own hands.
-    auto fComplainStart = [this, &connman, &peerman]() {
-        while (ProcessPendingMessageBatch<CDKGContribution>(connman, m_sporkman, *curSession, pendingContributions, peerman, 8)) {
-        }
+    auto fComplainStart = [this, &connman, &peerman, curQuorumHash]() {
+        DrainPendingMessages<CDKGContribution>(connman, pendingContributions, peerman, curQuorumHash);
         curSession->VerifyAndComplain(connman, pendingComplaints, peerman);
     };
     // The wait callback deliberately processes ONLY complaints. Once VerifyAndComplain has
@@ -638,9 +664,8 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     HandlePhase(QuorumPhase::Complain, QuorumPhase::Justify, curQuorumHash, 0.05, fComplainStart, fComplainWait);
 
     // Justify
-    auto fJustifyStart = [this, &connman, &peerman]() {
-        while (ProcessPendingMessageBatch<CDKGComplaint>(connman, m_sporkman, *curSession, pendingComplaints, peerman, 8)) {
-        }
+    auto fJustifyStart = [this, &connman, &peerman, curQuorumHash]() {
+        DrainPendingMessages<CDKGComplaint>(connman, pendingComplaints, peerman, curQuorumHash);
         curSession->VerifyAndJustify(pendingJustifications, peerman);
     };
     // Only justifications, for the same reason: VerifyAndJustify runs once, so a complaint
@@ -651,9 +676,8 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     HandlePhase(QuorumPhase::Justify, QuorumPhase::Commit, curQuorumHash, 0.05, fJustifyStart, fJustifyWait);
 
     // Commit
-    auto fCommitStart = [this, &connman, &peerman]() {
-        while (ProcessPendingMessageBatch<CDKGJustification>(connman, m_sporkman, *curSession, pendingJustifications, peerman, 8)) {
-        }
+    auto fCommitStart = [this, &connman, &peerman, curQuorumHash]() {
+        DrainPendingMessages<CDKGJustification>(connman, pendingJustifications, peerman, curQuorumHash);
         curSession->VerifyAndCommit(pendingPrematureCommitments, peerman);
     };
     auto fCommitWait = [this, &connman, &peerman] {
