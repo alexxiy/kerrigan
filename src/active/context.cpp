@@ -108,17 +108,22 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
     // quorum handling -- even if networking were somehow re-enabled.
     if (recovery::IsQuarantined()) return;
 
+    // Read our identity before nodeman processes the tip. A masternode that was excluded from a
+    // commitment can be PoSe-banned by that very block, and the ban clears the proTxHash, so asking
+    // afterwards would lose the one round the operator most needs to hear about.
+    const uint256 proTxHash{nodeman->GetProTxHash()};
+
     nodeman->UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload);
-    UpdateDkgOutcomes(pindexNew, pindexFork);
+    UpdateDkgOutcomes(pindexNew, pindexFork, proTxHash);
     ehf_sighandler->UpdatedBlockTip(pindexNew);
     gov_signer->UpdatedBlockTip(pindexNew);
     qdkgsman->UpdatedBlockTip(pindexNew, fInitialDownload);
     qman_handler->UpdatedBlockTip(pindexNew, fInitialDownload);
 }
 
-void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork)
+void ActiveContext::UpdateDkgOutcomes(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork,
+                                      const uint256& proTxHash)
 {
-    const uint256 proTxHash{nodeman->GetProTxHash()};
     if (proTxHash.IsNull()) return;
 
     // A commitment can only be mined inside a type's mining window, so most tips need no scan.
