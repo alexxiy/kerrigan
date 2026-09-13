@@ -23,17 +23,11 @@ minisketch_libminisketch_a_SOURCES += $(MINISKETCH_FIELD_GENERIC_HEADERS_INT) $(
 minisketch_libminisketch_a_CPPFLAGS = $(AM_CPPFLAGS) $(LIBMINISKETCH_CPPFLAGS)
 minisketch_libminisketch_a_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
 
-if ENABLE_TESTS
-if !ENABLE_FUZZ
-MINISKETCH_TEST = minisketch/test
-TESTS += $(MINISKETCH_TEST)
-check_PROGRAMS += $(MINISKETCH_TEST)
-
-minisketch_test_SOURCES = $(MINISKETCH_TEST_SOURCES_INT)
-minisketch_test_CPPFLAGS = $(AM_CPPFLAGS) $(LIBMINISKETCH_CPPFLAGS)
-minisketch_test_CXXFLAGS = $(AM_CXXFLAGS) $(PIE_FLAGS)
-minisketch_test_LDADD = $(MINISKETCH_LIBS)
-minisketch_test_LDFLAGS = $(RELDFLAGS) $(AM_LDFLAGS) $(LIBTOOL_APP_LDFLAGS) $(PTHREAD_FLAGS)
-
-endif
-endif
+# The upstream minisketch standalone self-test (minisketch/src/test.cpp) is not
+# part of this tree: the vendored snapshot only carries the library sources, so
+# declaring the minisketch/test check program here made "make check" abort with
+# "No rule to make target 'minisketch/src/test.cpp'" before any Kerrigan test
+# could run. The library is exercised through the wrapper Kerrigan actually
+# uses, in test/minisketch_tests.cpp (part of test_kerrigan), and by
+# test/fuzz/minisketch.cpp. Re-enable this block only together with a full
+# re-import of the upstream minisketch tree.

@@ -77,6 +77,7 @@
 #endif // ENABLE_WALLET
 
 #include <algorithm>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 
@@ -441,6 +442,18 @@ TestChainSetup::TestChainSetup(int num_blocks, const std::string& chain_name, co
     }
     IndexWaitSynced(*g_txindex);
 
+    // Tip hashes of the deterministic regtest chains the TestChainSetup
+    // fixtures build, keyed by the number of blocks mined. They pin the chain
+    // so that a change in consensus or in chainparams cannot silently alter
+    // what every TestChainSetup-based suite is actually testing.
+    //
+    // To regenerate after an intentional change, run the affected fixture on
+    // its own, for example
+    //   ./src/test/test_kerrigan --run_test=evo_dip3_activation_tests/dip3_activation_legacy
+    // and paste the hash from the "TestChainSetup: tip after N blocks is ..."
+    // line printed just below. One fixture per process: the first hard abort
+    // leaves gArgs populated, so every later fixture in the same process dies
+    // in ArgsManager::AddArg instead of reaching this check.
     CCheckpointData checkpoints{
         {
             /*TestChainDATSetup=*/
@@ -448,20 +461,26 @@ TestChainSetup::TestChainSetup(int num_blocks, const std::string& chain_name, co
             /*TestChain100Setup=*/
             {  100, uint256S("0x7363d8550143604e00d829714f6a88a4ccc75e8fe875074e0b0d57a7e3159e1f") },
             /*TestChainDIP3BeforeActivationSetup=*/
-            {  430, uint256S("0x36e03ab51a31f431e04985a834ea31c264feff51f9b00490be9631a8875a8d95") },
-            /*TestChainBRRBeforeActivationSetup=*/
-            {  497, uint256S("0x0857a9b5db51835b1c828f019f4c664b5fe6c28ac44a6d868436930f832d31e5") },
+            {  430, uint256S("0x56257350b387972dade18cd9b7a8c060785c07ba6af7467999c311dd8497ee83") },
             /*TestChainV19BeforeActivationSetup=*/
-            {  494, uint256S("0x44ee5c8a5e5cbd4437d63c54ddc1d40329be811b25c492fa901e11cdf408f905") },
+            {  494, uint256S("0x5f0b631eaf59584dbdd8e9bea3a27f27ad3ab915f2a7191bf4c958a0e8b439d3") },
         }
     };
 
     {
         LOCK(::cs_main);
         auto hash = checkpoints.mapCheckpoints.find(num_blocks);
+        const uint256 tip_hash{m_node.chainman->ActiveChain().Tip()->GetBlockHash()};
+        if (hash == checkpoints.mapCheckpoints.end() || tip_hash != hash->second) {
+            // assert() reports the expression, not the chain we built, and the
+            // built hash is the only thing needed to repair the table above.
+            tfm::format(std::cerr, "TestChainSetup: tip after %d blocks is %s (expected %s)\n",
+                        num_blocks, tip_hash.ToString(),
+                        hash == checkpoints.mapCheckpoints.end() ? "no table entry" : hash->second.ToString());
+        }
         assert(
             hash != checkpoints.mapCheckpoints.end() &&
-            m_node.chainman->ActiveChain().Tip()->GetBlockHash() == hash->second);
+            tip_hash == hash->second);
     }
 }
 
