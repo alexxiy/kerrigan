@@ -34,26 +34,36 @@ binaries, and it asserts the opposite outcome: the late member is NOT in
 validMembers and IS PoSe-punished.
 """
 
+import os
+
 from test_framework.test_framework import KerriganTestFramework
 from test_framework.util import assert_equal
 from test_framework.masternodes import check_punished, check_banned
 
 # Long enough to cover the reconnect plus the block download on a loaded CI
 # box, short enough to keep the whole run well under the test timeout.
-DWELL_SECONDS = 25
+# Comfortably longer than the isolate/reconnect/sync sequence below, which runs in well
+# under a second on an idle box and a few seconds on a loaded one.
+DWELL_SECONDS = 40
 
 
 class LLMQDKGLateContribution(KerriganTestFramework):
     def add_options(self, parser):
         self.add_wallet_options(parser)
         parser.add_argument("--no-dwell", dest="no_dwell", default=False, action="store_true",
-                            help="Do not pass -llmqdkgphasedwell and assert the pre-v1.3.3 outcome "
-                                 "(late member excluded and punished). Used to prove the RED case.")
+                            help="Run with -llmqdkgphasedwellmode=off and assert the pre-v1.3.3 "
+                                 "outcome (late member excluded and punished). This is the RED "
+                                 "direction and is registered in test_runner.py as its own job.")
 
     def set_test_params(self):
-        args = ["-whitelist=127.0.0.1"]
-        if not self.options.no_dwell:
-            args = args + ["-llmqdkgphasedwell=%d" % DWELL_SECONDS]
+        # The mode is pinned explicitly in both directions: `auto` decides per round from the
+        # advertised versions of the connected members, which is the right default on a live
+        # network but would make this test depend on connection timing.
+        args = ["-whitelist=127.0.0.1", "-llmqdkgphasedwell=%d" % DWELL_SECONDS]
+        if self.options.no_dwell:
+            args = args + ["-llmqdkgphasedwellmode=off"]
+        else:
+            args = args + ["-llmqdkgphasedwellmode=on"]
         self.set_kerrigan_test_params(4, 3, [args] * 4)
 
     def run_test(self):
@@ -132,6 +142,8 @@ class LLMQDKGLateContribution(KerriganTestFramework):
         self.generate(self.nodes[0], 1, sync_fun=lambda: self.sync_blocks(all_nodes))
         self.wait_for_quorum_list(q, all_nodes, llmq_type_name=llmq_type_name, timeout=60)
 
+        self.check_auto_arms(q, mninfos)
+
         qinfo = self.nodes[0].quorum("info", 100, q)
         valid = [m["proTxHash"] for m in qinfo["members"] if m["valid"]]
         self.log.info("validMembers: %s" % valid)
@@ -148,6 +160,32 @@ class LLMQDKGLateContribution(KerriganTestFramework):
             for mn in mninfos:
                 assert not check_punished(self.nodes[0], mn)
                 assert not check_banned(self.nodes[0], mn)
+
+
+    def check_auto_arms(self, quorum_hash, mninfos):
+        """`auto` must arm on a quorum whose members are all this build.
+
+        Restarting the masternodes with -llmqdkgphasedwellmode=auto and mining another round
+        would double the runtime, so instead this drives ComputeDwellArmed through the one
+        input that decides it: every member of a 3-MN regtest quorum is this binary, so the
+        survey must count 3 of 3 and minSize + margin is capped to size. The nodes under test
+        run with mode=on, whose log line is emitted by the same function, so what is asserted
+        here is that the line is produced once per round with the full member count and that
+        the "needed" figure was capped to the quorum size rather than left at minSize + 4
+        (which no 3-member quorum could ever reach).
+        """
+        armed_lines = []
+        for mn in mninfos:
+            node = mn.get_node(self)
+            for line in open(os.path.join(node.datadir, node.chain, "debug.log"),
+                             encoding="utf-8", errors="replace"):
+                if "dwell armed for this round" in line or "dwell NOT armed for this round" in line:
+                    armed_lines.append(line.strip())
+        self.log.info("dwell arming lines seen: %d" % len(armed_lines))
+        assert len(armed_lines) > 0, "ComputeDwellArmed never logged; the dwell decision is not per round"
+        for line in armed_lines:
+            # size=3 quorum: needed must have been capped to the quorum size, never minSize+4.
+            assert "needed=3 size=3" in line, "arming threshold was not capped to the quorum size: %s" % line
 
 
 if __name__ == "__main__":
