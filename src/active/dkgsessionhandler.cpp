@@ -31,8 +31,7 @@ ActiveDKGSessionHandler::ActiveDKGSessionHandler(
     CBLSWorker& bls_worker, CDeterministicMNManager& dmnman, CMasternodeMetaMan& mn_metaman,
     llmq::CDKGDebugManager& dkgdbgman, llmq::CDKGSessionManager& qdkgsman, llmq::CQuorumBlockProcessor& qblockman,
     llmq::CQuorumSnapshotManager& qsnapman, const CActiveMasternodeManager& mn_activeman, const ChainstateManager& chainman,
-    const CSporkManager& sporkman, const Consensus::LLMQParams& llmq_params, bool quorums_watch, int dkg_phase_dwell,
-    DkgPhaseDwellMode dkg_phase_dwell_mode, int quorums_idx) :
+    const CSporkManager& sporkman, const Consensus::LLMQParams& llmq_params, bool quorums_watch, int quorums_idx) :
     llmq::CDKGSessionHandler(llmq_params),
     m_bls_worker{bls_worker},
     m_dmnman{dmnman},
@@ -45,8 +44,6 @@ ActiveDKGSessionHandler::ActiveDKGSessionHandler(
     m_chainman{chainman},
     m_sporkman{sporkman},
     m_quorums_watch{quorums_watch},
-    m_dkg_phase_dwell{dkg_phase_dwell},
-    m_dkg_phase_dwell_mode{dkg_phase_dwell_mode},
     quorumIndex{quorums_idx}
 {
 }
@@ -323,212 +320,6 @@ void ActiveDKGSessionHandler::SleepBeforePhase(QuorumPhase curPhase, const uint2
     LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - done, curPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(curPhase));
 }
 
-// Keep a minimum amount of wall clock between two consecutive phase start handlers of one
-// round. A multi-algo block burst can connect a whole phase in a couple of seconds, and a
-// start handler such as VerifyAndComplain judges every member on what has arrived so far:
-// without a dwell, a member whose contribution is merely still in flight is marked bad and
-// gets PoSe-punished for being slow rather than for misbehaving. This is why the dwell is
-// applied even when the chain has already jumped several phases ahead - that is exactly the
-// case it exists for. It is purely local scheduling: no change to block validity and nothing
-// different on the wire.
-// Reads "1.3.3" out of a "/Kerrigan:1.3.3(comment)/" user agent. Anything we cannot read is
-// treated as "not dwell-aware", which is the safe direction: it only ever keeps the dwell off.
-static bool ParseKerriganVersion(const std::string& sub_ver, int& major, int& minor, int& patch)
-{
-    static const std::string prefix{"/Kerrigan:"};
-    const size_t start{sub_ver.find(prefix)};
-    if (start == std::string::npos) {
-        return false;
-    }
-    const size_t vstart{start + prefix.size()};
-    const size_t end{sub_ver.find_first_of("(/", vstart)};
-    if (end == std::string::npos || end <= vstart) {
-        return false;
-    }
-    const std::vector<std::string> parts{SplitString(sub_ver.substr(vstart, end - vstart), '.')};
-    if (parts.size() < 3) {
-        return false;
-    }
-    return ParseInt32(parts[0], &major) && ParseInt32(parts[1], &minor) && ParseInt32(parts[2], &patch);
-}
-
-// Cumulative, process-wide record of which masternodes have been seen advertising a client
-// that honours the dwell, keyed by proTxHash. It is deliberately never pruned within a
-// process: the survey is taken right after a phase boundary, and a block burst crosses that
-// boundary in milliseconds - long before MNAUTH has finished on every link - so a count that
-// moved with connection timing would put different nodes on different sides of the threshold
-// during the same round, which is the split the arming rule exists to prevent. Growing only,
-// it is stable across a round and converges between nodes within hours under SPORK_21.
-// Shared by every quorum type's handler because a masternode's client version is a property
-// of the node, not of the quorum we happened to meet it in.
-static Mutex cs_dwell_aware;
-static Uint256HashMap<bool> g_dwell_aware GUARDED_BY(cs_dwell_aware);
-
-// Decide once per round whether the dwell applies. A dwell that only some members honour is
-// worse than no dwell at all: the dwellers accept a late contribution the others already
-// judged bad, the two groups then mine different bitsets, and if neither reaches minSize the
-// round produces no commitment and everybody who was dropped takes a PoSe penalty anyway. So
-// in `auto` we arm only when the quorum is overwhelmingly on a client that dwells too, and we
-// re-decide every round so the network converges on its own as operators upgrade.
-// Fold whatever verified masternode peers we can see right now into the record. Called more
-// than once per round: a member can be connected while the quorum is being brought up and
-// gone again by the time the survey runs, and the whole point of the record is that such a
-// member is still counted.
-void ActiveDKGSessionHandler::RefreshDwellAwareness(const CConnman& connman) const
-{
-    // Every verified masternode peer is recorded, not just members of this quorum, because
-    // the next round draws a different membership from the same network.
-    connman.ForEachNode([&](const CNode* pnode) {
-        const uint256 proTxHash{pnode->GetVerifiedProRegTxHash()};
-        if (proTxHash.IsNull()) {
-            return;
-        }
-        const std::string sub_ver{WITH_LOCK(pnode->m_subver_mutex, return pnode->cleanSubVer)};
-        int major{0}, minor{0}, patch{0};
-        const bool aware{ParseKerriganVersion(sub_ver, major, minor, patch) &&
-                         (major > DKG_PHASE_DWELL_MIN_MAJOR ||
-                          (major == DKG_PHASE_DWELL_MIN_MAJOR &&
-                           (minor > DKG_PHASE_DWELL_MIN_MINOR ||
-                            (minor == DKG_PHASE_DWELL_MIN_MINOR && patch >= DKG_PHASE_DWELL_MIN_PATCH))))};
-        // A member that comes back on an older client flips its flag back, but a member we
-        // have already met is never dropped from the record.
-        LOCK(cs_dwell_aware);
-        g_dwell_aware[proTxHash] = aware;
-    });
-}
-
-bool ActiveDKGSessionHandler::ComputeDwellArmed(const CConnman& connman) const
-{
-    RefreshDwellAwareness(connman);
-
-    // Count DISTINCT members of the CURRENT quorum. Counting connections instead would be
-    // wrong twice over: an inbound and an outbound link to the same masternode are two CNodes
-    // but one member, and a member free to churn connections could buy itself votes.
-    int dwell_aware{0};
-    {
-        LOCK(cs_dwell_aware);
-        for (const auto& m : curSession->members) {
-            if (m->dmn->proTxHash == curSession->myProTxHash) {
-                ++dwell_aware; // ourselves, by construction
-                continue;
-            }
-            if (const auto it = g_dwell_aware.find(m->dmn->proTxHash);
-                it != g_dwell_aware.end() && it->second) {
-                ++dwell_aware;
-            }
-        }
-    }
-
-    // minSize + margin keeps us clear of the smallest bitset that can still win a round. On a
-    // quorum too small for that (regtest) require every member instead.
-    const int needed{std::min(params.minSize + DKG_PHASE_DWELL_ARM_MARGIN, params.size)};
-    bool armed{false};
-    switch (m_dkg_phase_dwell_mode) {
-    case DkgPhaseDwellMode::Off:
-        armed = false;
-        break;
-    case DkgPhaseDwellMode::On:
-        armed = true;
-        break;
-    case DkgPhaseDwellMode::Auto:
-        armed = dwell_aware >= needed;
-        break;
-    }
-    // Logged in every mode, once per round: the survey is what an operator needs to see to
-    // know why `auto` is or is not dwelling yet, and it is cheap next to a round of BLS.
-    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell %s for this round, dwell-aware members=%d of %d, needed=%d\n", __func__, params.name, quorumIndex, armed ? "armed" : "NOT armed", dwell_aware, (int)curSession->members.size(), needed);
-    return armed;
-}
-
-void ActiveDKGSessionHandler::WaitPhaseDwell(QuorumPhase curPhase, const uint256& expectedQuorumHash,
-                                             const WhileWaitFunc& runWhileWaiting) const
-{
-    if (m_dkg_phase_dwell <= 0 || !m_dwell_armed.load() || !curSession->AreWeMember()) {
-        // A non-member judges nobody, so it has nothing to wait for and should not hold back
-        // its own (observer-only) progress.
-        return;
-    }
-    const int64_t prev_start_ms{m_phase_start_ms.load()};
-    if (prev_start_ms == 0) {
-        // First start handler of this round (Contribute). Never delay it: nothing has been
-        // judged yet and delaying it would only make our own messages later for everybody.
-        return;
-    }
-
-    const int64_t spacing{Params().GetConsensus().nPowTargetSpacing};
-    const int64_t dwell_s{std::min({int64_t{m_dkg_phase_dwell}, int64_t{MAX_DKG_PHASE_DWELL},
-                                    int64_t{params.dkgPhaseBlocks} * spacing / 2})};
-    if (dwell_s <= 0) {
-        return;
-    }
-
-    // Budget the dwell against the mining window. Commit is the last start handler of the
-    // round, so the dwells still ahead of us must all fit before the window opens - a
-    // commitment that misses its window helps nobody, which is strictly worse than judging
-    // a little early.
-    const int remaining_dwells{ToUnderlying(QuorumPhase::Commit) - ToUnderlying(curPhase) + 1};
-    if (remaining_dwells <= 0) {
-        return;
-    }
-    const int64_t blocks_left{int64_t{curSession->BlockIndex()->nHeight} + params.dkgMiningWindowStart -
-                              currentHeight.load()};
-    const int64_t budget_ms{blocks_left > 0 ? blocks_left * spacing * 1000 : 0};
-    const int64_t planned_ms{std::min<int64_t>(dwell_s * 1000 * remaining_dwells, budget_ms)};
-    const int64_t this_dwell_ms{planned_ms / remaining_dwells};
-    if (this_dwell_ms <= 0) {
-        LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell skipped, mining window is too close (blocks_left=%lld)\n", __func__, params.name, quorumIndex, static_cast<long long>(blocks_left));
-        return;
-    }
-
-    // The dwell reads the mockable clock, unlike SleepBeforePhase which reads the system
-    // clock. SleepBeforePhase only staggers our own sends, so a test that fast-forwards
-    // mocktime should not skip it; the dwell decides WHEN WE JUDGE OTHER MEMBERS, which is
-    // the behaviour a functional test has to be able to drive, and driving it is the only way
-    // a 30 s production dwell can be exercised without 30 s of test runtime per phase.
-    const int64_t now_ms{GetTime<std::chrono::milliseconds>().count()};
-    // Deadline capped against both anchors. A clock that steps backwards - an NTP correction
-    // or a setmocktime in a test - would otherwise leave prev_start_ms far in the future and
-    // turn the dwell into a wait that only a new quorum hash could end.
-    const int64_t end_time{std::min(prev_start_ms + this_dwell_ms, now_ms + this_dwell_ms)};
-
-    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwelling up to %d ms before the next start handler (curPhase=%d, remaining=%d)\n", __func__, params.name, quorumIndex, end_time - GetTime<std::chrono::milliseconds>().count(), ToUnderlying(curPhase), remaining_dwells);
-
-    while (true) {
-        const int64_t now{GetTime<std::chrono::milliseconds>().count()};
-        if (now >= end_time) {
-            break;
-        }
-        if (now < prev_start_ms) {
-            // The clock moved back behind the start of the previous handler, so the gap we
-            // are measuring no longer means anything. Judge now rather than wait blind.
-            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell cut short, clock stepped back behind the phase start\n", __func__, params.name, quorumIndex);
-            break;
-        }
-        if (stopRequested) {
-            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due to stop/shutdown requested\n", __func__, params.name, quorumIndex);
-            throw AbortPhaseException();
-        }
-        auto [p, qh] = GetPhaseAndQuorumHash();
-        if (qh != expectedQuorumHash) {
-            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due unexpected expectedQuorumHash change\n", __func__, params.name, quorumIndex);
-            throw AbortPhaseException();
-        }
-        if (ToUnderlying(p) < ToUnderlying(curPhase)) {
-            // Backward move within the same round (intra-window reorg), same rule as
-            // SleepBeforePhase: the session we were about to act on no longer exists.
-            LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - aborting due backward phase change, phase=%d, curPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(p), ToUnderlying(curPhase));
-            throw AbortPhaseException();
-        }
-        // A phase that has run FORWARD must not abort the dwell, otherwise the burst we are
-        // protecting against would cancel the protection.
-        if (!runWhileWaiting()) {
-            UninterruptibleSleep(std::chrono::milliseconds{100});
-        }
-    }
-
-    LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - dwell done\n", __func__, params.name, quorumIndex);
-}
-
 void ActiveDKGSessionHandler::HandlePhase(QuorumPhase curPhase, QuorumPhase nextPhase,
                                           const uint256& expectedQuorumHash, double randomSleepFactor,
                                           const StartPhaseFunc& startPhaseFunc, const WhileWaitFunc& runWhileWaiting)
@@ -536,11 +327,6 @@ void ActiveDKGSessionHandler::HandlePhase(QuorumPhase curPhase, QuorumPhase next
     LogPrint(BCLog::LLMQ_DKG, "ActiveDKGSessionHandler::%s -- %s qi[%d] - starting, curPhase=%d, nextPhase=%d\n", __func__, params.name, quorumIndex, ToUnderlying(curPhase), ToUnderlying(nextPhase));
 
     SleepBeforePhase(curPhase, expectedQuorumHash, randomSleepFactor, runWhileWaiting);
-    WaitPhaseDwell(curPhase, expectedQuorumHash, runWhileWaiting);
-    // Stamp before running the handler, not after: the dwell measures the gap between the
-    // START of two handlers, and a handler that itself takes seconds (VerifyAndComplain on a
-    // 60-member quorum does real BLS work) would otherwise silently extend every later dwell.
-    m_phase_start_ms = GetTime<std::chrono::milliseconds>().count();
     startPhaseFunc();
     WaitForNextPhase(curPhase, nextPhase, expectedQuorumHash, runWhileWaiting);
 
@@ -769,10 +555,6 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
     pendingComplaints.Clear();
     pendingJustifications.Clear();
     pendingPrematureCommitments.Clear();
-    // The dwell is per round: the first start handler of a new round must never be delayed,
-    // and whether it applies at all is re-decided below once the quorum is connected.
-    m_phase_start_ms = 0;
-    m_dwell_armed = false;
     uint256 curQuorumHash = WITH_LOCK(cs_phase_qhash, return quorumHash);
 
     const CBlockIndex* pQuorumBaseBlockIndex = WITH_LOCK(::cs_main,
@@ -810,27 +592,7 @@ void ActiveDKGSessionHandler::HandleDKGRound(CConnman& connman, PeerManager& pee
                                          curSession->myProTxHash);
     }
 
-    // First look, while the connections we just asked for are coming up. The arming decision
-    // is still taken once, below, but a member seen only during this window is remembered.
-    RefreshDwellAwareness(connman);
-
-    // ... and keep looking for the rest of the Initialized phase. MNAUTH completes at its own
-    // pace on each link, so a single snapshot systematically undercounts: whichever members
-    // had not yet identified themselves at that instant are invisible, and on a network where
-    // that instant differs per node the arming decision would differ per node too. Sampling
-    // throughout costs one walk of the peer list per 100 ms of a phase that happens once an
-    // hour. If a burst crosses the boundary immediately this simply does not run, which is
-    // why the two explicit calls around it stay.
-    WaitForNextPhase(QuorumPhase::Initialized, QuorumPhase::Contribute, curQuorumHash,
-                     [this, &connman] {
-                         RefreshDwellAwareness(connman);
-                         return false; // keep the 100 ms cadence of the wait loop
-                     });
-
-    // Decided here, after the Initialized phase has had its blocks to bring the intra-quorum
-    // connections up, so the version survey sees the real membership.
-    // Non-members judge nobody, so there is nothing to arm and no reason to survey.
-    m_dwell_armed = curSession->AreWeMember() && ComputeDwellArmed(connman);
+    WaitForNextPhase(QuorumPhase::Initialized, QuorumPhase::Contribute, curQuorumHash);
 
     // Contribute
     auto fContributeStart = [this, &peerman]() { curSession->Contribute(pendingContributions, peerman); };

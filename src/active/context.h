@@ -86,8 +86,7 @@ public:
                            llmq::CQuorumSnapshotManager& qsnapman, llmq::CSigningManager& sigman,
                            const CMasternodeSync& mn_sync, const CBLSSecretKey& operator_sk,
                            const llmq::QvvecSyncModeMap& sync_map, const util::DbWrapperParams& db_params,
-                           bool quorums_recovery, bool quorums_watch, int dkg_phase_dwell,
-                           llmq::DkgPhaseDwellMode dkg_phase_dwell_mode, bool selfcheck_strict);
+                           bool quorums_recovery, bool quorums_watch, bool selfcheck_strict);
     ~ActiveContext();
 
     void Start(CConnman& connman, PeerManager& peerman, CScheduler& scheduler);

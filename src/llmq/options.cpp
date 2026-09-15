@@ -20,14 +20,6 @@
 namespace llmq
 {
 
-std::optional<DkgPhaseDwellMode> ParseDkgPhaseDwellMode(const std::string& mode)
-{
-    if (mode == "auto") return DkgPhaseDwellMode::Auto;
-    if (mode == "on") return DkgPhaseDwellMode::On;
-    if (mode == "off") return DkgPhaseDwellMode::Off;
-    return std::nullopt;
-}
-
 static bool EvalSpork(const Consensus::LLMQType llmqType, const int64_t spork_value)
 {
     if (spork_value == 0) {

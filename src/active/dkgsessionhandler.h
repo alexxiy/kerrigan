@@ -55,10 +55,6 @@ private:
     const ChainstateManager& m_chainman;
     const CSporkManager& m_sporkman;
     const bool m_quorums_watch{false};
-    //! -llmqdkgphasedwell, minimum seconds of wall clock between two phase start handlers
-    const int m_dkg_phase_dwell{0};
-    //! -llmqdkgphasedwellmode
-    const DkgPhaseDwellMode m_dkg_phase_dwell_mode{DkgPhaseDwellMode::Auto};
     const int quorumIndex;
 
 private:
@@ -68,11 +64,6 @@ private:
     std::thread phaseHandlerThread;
     std::unique_ptr<CDKGSession> curSession{nullptr};
 
-    //! Wall clock (ms since epoch) at which the last phase start handler of the current round
-    //! ran, 0 when no start handler ran yet for this round.
-    std::atomic<int64_t> m_phase_start_ms{0};
-    //! Whether the dwell applies to the round currently being handled, decided once per round.
-    std::atomic<bool> m_dwell_armed{false};
 
     mutable Mutex cs_phase_qhash;
     QuorumPhase phase GUARDED_BY(cs_phase_qhash){QuorumPhase::Idle};
@@ -87,7 +78,7 @@ public:
                             llmq::CQuorumBlockProcessor& qblockman, llmq::CQuorumSnapshotManager& qsnapman,
                             const CActiveMasternodeManager& mn_activeman, const ChainstateManager& chainman,
                             const CSporkManager& sporkman, const Consensus::LLMQParams& llmq_params, bool quorums_watch,
-                            int dkg_phase_dwell, DkgPhaseDwellMode dkg_phase_dwell_mode, int quorums_idx);
+                            int quorums_idx);
     ~ActiveDKGSessionHandler();
 
 public:
@@ -118,10 +109,6 @@ private:
     void WaitForNewQuorum(const uint256& oldQuorumHash) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     void SleepBeforePhase(QuorumPhase curPhase, const uint256& expectedQuorumHash, double randomSleepFactor,
                           const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
-    void RefreshDwellAwareness(const CConnman& connman) const;
-    bool ComputeDwellArmed(const CConnman& connman) const;
-    void WaitPhaseDwell(QuorumPhase curPhase, const uint256& expectedQuorumHash,
-                        const WhileWaitFunc& runWhileWaiting) const EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
     template <typename Message>
     void DrainPendingMessages(const CConnman& connman, CDKGPendingMessages& pendingMessages, PeerManager& peerman,
                               const uint256& expectedQuorumHash) EXCLUSIVE_LOCKS_REQUIRED(!cs_phase_qhash);
