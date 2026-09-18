@@ -47,6 +47,22 @@ extern RPCHelpMan addmultisigaddress();
 // as the default levels for node policy.
 static_assert(DEFAULT_TRANSACTION_MINFEE >= DEFAULT_MIN_RELAY_TX_FEE, "wallet minimum fee is smaller than default relay fee");
 
+
+//! What the miner actually keeps from one coinbase.
+//!
+//! Kerrigan splits the block subsidy three ways: the masternode takes 20%
+//! (validation.cpp, blockValue / 5) and the growth-escrow/drone slot takes 40%
+//! (masternode/payments.cpp), leaving the miner 40%. The subsidy itself is in
+//! validation.cpp GetBlockSubsidyInner.
+//!
+//! Spelled out as arithmetic rather than a single number because the previous
+//! literal here (500 * COIN) was inherited from before this chain's economics
+//! and silently asserted a value the wallet never produced.
+static constexpr CAmount TEST_BLOCK_SUBSIDY{25 * COIN};
+static constexpr CAmount TEST_MASTERNODE_SHARE{TEST_BLOCK_SUBSIDY / 5};
+static constexpr CAmount TEST_ESCROW_SHARE{TEST_BLOCK_SUBSIDY * 2 / 5};
+static constexpr CAmount TEST_MINER_COINBASE{TEST_BLOCK_SUBSIDY - TEST_MASTERNODE_SHARE - TEST_ESCROW_SHARE};
+
 BOOST_FIXTURE_TEST_SUITE(wallet_tests, WalletTestingSetup)
 
 static std::shared_ptr<CWallet> TestLoadWallet(WalletContext& context)
@@ -151,7 +167,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
         BOOST_CHECK(result.last_failed_block.IsNull());
         BOOST_CHECK_EQUAL(result.last_scanned_block, newTip->GetBlockHash());
         BOOST_CHECK_EQUAL(*result.last_scanned_height, newTip->nHeight);
-        BOOST_CHECK_EQUAL(GetBalance(wallet).m_mine_immature, 1000 * COIN);
+        BOOST_CHECK_EQUAL(GetBalance(wallet).m_mine_immature, 2 * TEST_MINER_COINBASE);
 
         {
             CBlockLocator locator;
@@ -186,7 +202,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
         BOOST_CHECK_EQUAL(result.last_failed_block, oldTip->GetBlockHash());
         BOOST_CHECK_EQUAL(result.last_scanned_block, newTip->GetBlockHash());
         BOOST_CHECK_EQUAL(*result.last_scanned_height, newTip->nHeight);
-        BOOST_CHECK_EQUAL(GetBalance(wallet).m_mine_immature, 500 * COIN);
+        BOOST_CHECK_EQUAL(GetBalance(wallet).m_mine_immature, TEST_MINER_COINBASE);
     }
 
     // Prune the remaining block file.
@@ -376,7 +392,7 @@ BOOST_FIXTURE_TEST_CASE(coin_mark_dirty_immature_credit, TestChain100Setup)
     // credit amount is calculated.
     wtx.MarkDirty();
     AddKey(wallet, coinbaseKey);
-    BOOST_CHECK_EQUAL(CachedTxGetImmatureCredit(wallet, wtx, ISMINE_SPENDABLE), 500*COIN);
+    BOOST_CHECK_EQUAL(CachedTxGetImmatureCredit(wallet, wtx, ISMINE_SPENDABLE), TEST_MINER_COINBASE);
 }
 
 static int64_t AddTx(ChainstateManager& chainman, CWallet& wallet, uint32_t lockTime, int64_t mockTime, int64_t blockTime)
@@ -584,7 +600,7 @@ BOOST_FIXTURE_TEST_CASE(ListCoinsTest, ListCoinsTestingSetup)
     BOOST_CHECK_EQUAL(list.begin()->second.size(), 1U);
 
     // Check initial balance from one mature coinbase transaction.
-    BOOST_CHECK_EQUAL(500 * COIN, GetAvailableBalance(*wallet));
+    BOOST_CHECK_EQUAL(TEST_MINER_COINBASE, GetAvailableBalance(*wallet));
 
     // Add a transaction creating a change address, and confirm ListCoins still
     // returns the coin associated with the change address underneath the
@@ -826,7 +842,21 @@ BOOST_FIXTURE_TEST_CASE(CreateWalletWithoutChain, BasicTestingSetup)
 {
     WalletContext context;
     context.args = &m_args;
-    auto wallet = TestLoadWallet(context);
+
+    // Deliberately NOT TestLoadWallet: that helper calls AddWallet, so the
+    // context would hold a second reference and UnloadWallet would block
+    // forever waiting for a shared_ptr deleter that can never run. Removing it
+    // first is not an option either, because RemoveWallet routes through
+    // CWallet::chain(), which asserts m_chain, and this case exists precisely
+    // to build a wallet with no chain. So the wallet is simply never
+    // registered, and the local reference is the only one.
+    DatabaseOptions options;
+    options.create_flags = WALLET_FLAG_DESCRIPTORS;
+    DatabaseStatus status;
+    bilingual_str error;
+    std::vector<bilingual_str> warnings;
+    auto database = MakeWalletDatabase("", options, status, error);
+    auto wallet = CWallet::Create(context, "", std::move(database), options.create_flags, error, warnings);
     BOOST_CHECK(wallet);
     UnloadWallet(std::move(wallet));
 }
@@ -1092,7 +1122,10 @@ public:
         CCoinControl coinControl;
         {
             auto res = wallet::CreateTransaction(*wallet, GetRecipients(vecEntries), nChangePosRet, coinControl);
-            BOOST_CHECK(res);
+            // REQUIRE, not CHECK: res is dereferenced on the next line, and a
+            // failed util::Result asserts there, aborting the whole test binary
+            // and taking unrelated later cases with it.
+            BOOST_REQUIRE(res);
             tx = res->tx;
             nChangePosRet = res->change_pos;
         }
@@ -1375,7 +1408,11 @@ BOOST_FIXTURE_TEST_CASE(CreateTransactionTest, CreateTransactionTestSetup)
 
         coinControl = CCoinControl();
         coinControl.m_feerate = CFeeRate(fallbackFee);
-        coinControl.Select(GetCoins({{100 * COIN, false}})[0]);
+        // One coinbase is ample: the checks below spend 545-5000 sat amounts and
+        // at most 100 outputs of 5000 sat. The old 100 * COIN assumed the
+        // pre-split subsidy and is simply not fundable now that the miner keeps
+        // 40% of 25 COIN.
+        coinControl.Select(GetCoins({{TEST_MINER_COINBASE, false}})[0]);
 
         BOOST_CHECK(CreateTransaction({{-5000, false}}, strAmountNotNegative, false));
         BOOST_CHECK(CreateTransaction({}, strAtLeastOneRecipient, false));

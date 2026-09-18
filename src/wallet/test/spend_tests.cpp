@@ -25,13 +25,19 @@ BOOST_FIXTURE_TEST_CASE(SubtractFee, TestChain100Setup)
     // leftover input amount which would have been change to the recipient
     // instead of the miner.
     auto check_tx = [&wallet](CAmount leftover_input_amount) {
-        CRecipient recipient{GetScriptForRawPubKey({}), 500 * COIN - leftover_input_amount, true /* subtract fee */};
+        // See wallet_tests.cpp: the miner keeps 40% of the subsidy, not the whole
+        // 500 * COIN this used to assume.
+        constexpr CAmount kMinerCoinbase{25 * COIN - (25 * COIN) / 5 - (25 * COIN) * 2 / 5};
+        CRecipient recipient{GetScriptForRawPubKey({}), kMinerCoinbase - leftover_input_amount, true /* subtract fee */};
         bilingual_str error;
         CCoinControl coin_control;
         coin_control.m_feerate.emplace(10000);
         coin_control.fOverrideFeeRate = true;
         auto res = CreateTransaction(*wallet, {recipient}, RANDOM_CHANGE_POSITION, coin_control);
-        BOOST_CHECK(res);
+        // REQUIRE, not CHECK: the next line dereferences res, and on a failed
+        // util::Result that asserts and aborts the whole test binary, taking
+        // unrelated later cases down with it.
+        BOOST_REQUIRE(res);
         const auto& txr = *res;
         BOOST_CHECK_EQUAL(txr.tx->vout.size(), 1);
         BOOST_CHECK_EQUAL(txr.tx->vout[0].nValue, recipient.nAmount + leftover_input_amount - txr.fee);
