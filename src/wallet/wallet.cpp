@@ -1299,6 +1299,11 @@ bool CWallet::AbandonTransaction(const uint256& hashTx)
     fAnonymizableTallyCached = false;
     fAnonymizableTallyCachedNonDenom = false;
 
+    // The user has declared this spend dead, so any Sapling notes it was marked
+    // as spending should come back. Schedule the check rather than releasing
+    // here: the chain still has to confirm the nullifier is absent.
+    m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+
     return true;
 }
 
@@ -1421,6 +1426,15 @@ void CWallet::transactionAddedToMempool(const CTransactionRef& tx, int64_t nAcce
 }
 
 void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason) {
+    // A Sapling spend that leaves the mempool without being mined may have
+    // stranded the notes it was marked as spending. Schedule the repair; do NOT
+    // release anything here. Only RepairStaleSaplingSpends may release a note,
+    // and only once the chain confirms the nullifier is absent. Leaving the
+    // mempool is a reason to go and check, never proof on its own.
+    if (reason != MemPoolRemovalReason::BLOCK && tx->nType == TRANSACTION_SAPLING) {
+        m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+    }
+
     if (reason != MemPoolRemovalReason::CONFLICT) {
         LOCK(cs_wallet);
         auto it = mapWallet.find(tx->GetHash());
