@@ -174,9 +174,11 @@ void ChainlockHandler::TransactionAddedToMempool(const CTransactionRef& tx, int6
         return;
     }
     if (tx->vin.empty()) {
-        if (tx->nType == TRANSACTION_SAPLING) {
-            return;  // Sapling shielded-only, safe by construction, no IS needed
-        }
+        // No transparent inputs, so nothing an InstantSend lock could cover and
+        // nothing to double spend. Record it as safe rather than leaving it
+        // untracked, which IsTxSafeForMining would read as "never safe".
+        LOCK(cs);
+        noInputTxs.emplace(tx->GetHash());
         return;
     }
 
@@ -202,7 +204,7 @@ void ChainlockHandler::BlockConnected(const std::shared_ptr<const CBlock>& pbloc
         for (const auto& tx : pblock->vtx) {
             if (tx->IsCoinBase()) continue;
             if (tx->vin.empty()) {
-                if (tx->nType == TRANSACTION_SAPLING) continue;  // shielded-only, no IS needed
+                noInputTxs.emplace(tx->GetHash());
                 continue;
             }
             txFirstSeenTime.emplace(tx->GetHash(), curTime);
@@ -215,6 +217,10 @@ bool ChainlockHandler::IsTxSafeForMining(const uint256& txid) const
     auto tx_age{0s};
     {
         LOCK(cs);
+        if (noInputTxs.count(txid) != 0) {
+            // Cannot conflict with an InstantSend lock, so it never needs to wait.
+            return true;
+        }
         auto it = txFirstSeenTime.find(txid);
         if (it != txFirstSeenTime.end()) {
             tx_age = GetTime<std::chrono::seconds>() - it->second;
@@ -283,6 +289,7 @@ void ChainlockHandler::CleanupFromSigner(const std::vector<std::shared_ptr<Uint2
     for (const auto& tx : cleanup_txes) {
         for (const uint256& txid : *tx) {
             txFirstSeenTime.erase(txid);
+            noInputTxs.erase(txid);
         }
     }
 }
@@ -325,6 +332,36 @@ void ChainlockHandler::Cleanup()
 
     LOCK(::cs_main);
     LOCK2(mempool.cs, cs); // need mempool.cs due to GetTransaction calls
+    // Same lifecycle for input-less txs: forget them once they have vanished or
+    // are buried deeper than the signer ever looks back.
+    for (auto it = noInputTxs.begin(); it != noInputTxs.end();) {
+        uint256 hashBlock;
+        if (auto tx = GetTransaction(nullptr, &mempool, *it, Params().GetConsensus(), hashBlock); !tx) {
+            it = noInputTxs.erase(it);
+        } else if (!hashBlock.IsNull()) {
+            // A non-null hashBlock means GetTransaction did not find it in the
+            // mempool, so this entry cannot be one we must protect.
+            const auto* pindex = m_chainman.m_blockman.LookupBlockIndex(hashBlock);
+            assert(pindex);
+            const bool on_active_chain{m_chainman.ActiveTip()->GetAncestor(pindex->nHeight) == pindex};
+            if (!on_active_chain ||
+                m_chainman.ActiveChain().Height() - pindex->nHeight > chainlock::TX_CONFIRM_THRESHOLD) {
+                // Buried deeper than the signer looks back, or left on a stale
+                // branch. The stale case matters with -txindex, which is not
+                // rewound on reorg and would otherwise pin the entry forever.
+                // If a reorg puts the tx back in the mempool,
+                // TransactionAddedToMempool records it again.
+                it = noInputTxs.erase(it);
+            } else {
+                ++it;
+            }
+        } else {
+            // Still in the mempool and unmined. Never drop these: without the
+            // entry IsTxSafeForMining would call it unsafe and it could never
+            // be mined, which is the bug this set exists to prevent.
+            ++it;
+        }
+    }
     for (auto it = txFirstSeenTime.begin(); it != txFirstSeenTime.end();) {
         uint256 hashBlock;
         if (auto tx = GetTransaction(nullptr, &mempool, it->first, Params().GetConsensus(), hashBlock); !tx) {

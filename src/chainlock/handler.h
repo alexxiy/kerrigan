@@ -61,6 +61,16 @@ private:
 
     const CBlockIndex* lastNotifyChainLockBlockIndex GUARDED_BY(cs){nullptr};
     Uint256HashMap<std::chrono::seconds> txFirstSeenTime GUARDED_BY(cs);
+    // Transactions with no transparent inputs (shielded-only Sapling spends).
+    // They cannot conflict with an InstantSend lock because InstantSend locks
+    // inputs and these have none, so they are safe to mine and to sign over
+    // immediately. They are tracked here rather than in txFirstSeenTime
+    // because that map encodes "not present" as "not safe yet", which would
+    // leave them permanently unmineable.
+    // INVARIANT: never erase a txid that is still in the mempool and unmined.
+    // IsTxSafeForMining treats an absent entry as not yet safe, so dropping a
+    // live one restores the permanent-unmineable bug this set was added to fix.
+    Uint256HashSet noInputTxs GUARDED_BY(cs);
 
     std::map<uint256, std::chrono::seconds> seenChainLocks GUARDED_BY(cs);
 
