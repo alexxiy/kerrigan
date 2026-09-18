@@ -1421,19 +1421,6 @@ void CWallet::transactionAddedToMempool(const CTransactionRef& tx, int64_t nAcce
 }
 
 void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason) {
-    // A Sapling spend seen in the mempool marks its notes spent immediately.
-    // If the tx leaves the mempool for any reason other than being mined, that
-    // spend never happened, so release the notes: otherwise they stay spent
-    // forever and the balance silently disappears.
-    if (reason != MemPoolRemovalReason::BLOCK && tx->nType == TRANSACTION_SAPLING) {
-        LOCK(cs_wallet);
-        WalletBatch batch(GetDatabase());
-        if (size_t n = m_sapling_key_manager.UnmarkSpentBy(tx->GetHash(), &batch)) {
-            WalletLogPrintf("Sapling: released %u note(s) spent by %s (left mempool unmined, reason=%d)\n",
-                            (unsigned)n, tx->GetHash().ToString(), (int)reason);
-            m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
-        }
-    }
     if (reason != MemPoolRemovalReason::CONFLICT) {
         LOCK(cs_wallet);
         auto it = mapWallet.find(tx->GetHash());
@@ -1905,36 +1892,6 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
     return applied;
 }
 
-void CWallet::RepairStaleSaplingSpends()
-{
-    AssertLockHeld(cs_wallet);
-
-    // Collect the spending txids the key manager believes are live.
-    std::set<uint256> spendingTxids;
-    for (const auto& [cmu, nd] : m_sapling_key_manager.GetAllNotes()) {
-        if (nd.isSpent && !nd.spendingTxid.IsNull()) spendingTxids.insert(nd.spendingTxid);
-    }
-    if (spendingTxids.empty()) return;
-
-    WalletBatch batch(GetDatabase());
-    size_t released = 0;
-    for (const uint256& txid : spendingTxids) {
-        auto it = mapWallet.find(txid);
-        if (it != mapWallet.end()) {
-            const CWalletTx& wtx = it->second;
-            // Mined, or still pending in the mempool: the spend stands.
-            if (GetTxDepthInMainChain(wtx) > 0 || wtx.InMempool()) continue;
-        }
-        // Either the wallet never knew the tx, or it is neither confirmed nor
-        // in the mempool. The spend is not going to happen; release the notes.
-        released += m_sapling_key_manager.UnmarkSpentBy(txid, &batch);
-    }
-    if (released) {
-        WalletLogPrintf("Sapling: released %u note(s) whose spending tx never confirmed\n",
-                        (unsigned)released);
-    }
-}
-
 void CWallet::MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config)
 {
     // Guided repair (WS-HEAL v2 6.4.b) re-arms the one-shot check and
@@ -1981,8 +1938,6 @@ void CWallet::MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config)
         LOCK(cs_wallet);
 
         if (m_sapling_key_manager.IsEmpty()) return;
-
-        RepairStaleSaplingSpends();
 
         tipHeight = m_last_block_processed_height;
         auto stale = m_sapling_key_manager.DetectStaleWitnesses(tipHeight);

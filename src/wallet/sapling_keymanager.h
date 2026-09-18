@@ -500,18 +500,6 @@ public:
     std::vector<StaleWitnessReport> DetectStaleWitnesses(int walletTipHeight) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
-     * Clear the spent flag on every note marked spent by `spendingTxid`.
-     *
-     * ScanSaplingSpends() marks a note spent as soon as the spending tx is
-     * seen, including from the mempool. If that tx never confirms (conflicted
-     * by a reorg, evicted, replaced) nothing else clears the flag, and the
-     * note stays permanently unspendable while still showing in GetAllNotes().
-     * The nullifier is deliberately kept so a later genuine spend is still
-     * matched. Returns the number of notes unmarked.
-     */
-    size_t UnmarkSpentBy(const uint256& spendingTxid, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
-
-    /**
      * Rewind Sapling state for a disconnected block.
      *
      * Undoes spends (clears isSpent/spendingTxid), reverts outputs confirmed
