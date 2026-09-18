@@ -507,6 +507,16 @@ public:
      * Notes are never erased; they remain as unconfirmed entries and will be
      * re-confirmed if they appear in the new fork.
      */
+    /**
+     * Clear the spent flag on every note recorded as spent by spendingTxid.
+     * Returns how many notes were released.
+     *
+     * Callers MUST have positive evidence that the spend did not happen (see
+     * CWallet::RepairStaleSaplingSpends). Releasing a note whose nullifier is
+     * on chain makes already-spent funds look spendable.
+     */
+    size_t UnmarkSpentBy(const uint256& spendingTxid, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     void RewindBlock(int height, const CBlock& block, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
 

@@ -156,6 +156,14 @@ public:
     //! Return list of MN Collateral from outputs
     virtual std::vector<COutPoint> listMNCollaterials(const std::vector<std::pair<const CTransactionRef&, uint32_t>>& outputs) = 0;
 
+    //! Is this Sapling nullifier recorded as spent on the active chain?
+    //!
+    //! Returns nullopt when that cannot be determined (no Sapling state, e.g. a
+    //! wallet-only process). Callers must treat nullopt as "unknown" and never as
+    //! "not spent": absence of an answer is not evidence that a note is unspent,
+    //! and acting on it can resurrect an already-spent note.
+    virtual std::optional<bool> hasSaplingNullifier(const uint256& nullifier) = 0;
+
     //! Return whether node has the block and optionally return block metadata
     //! or contents.
     virtual bool findBlock(const uint256& hash, const FoundBlock& block={}) = 0;

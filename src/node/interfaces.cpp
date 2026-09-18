@@ -40,6 +40,7 @@
 #include <node/blockstorage.h>
 #include <node/coin.h>
 #include <node/context.h>
+#include <sapling/sapling_state.h>
 #include <node/interface_ui.h>
 #include <node/transaction.h>
 #include <policy/feerate.h>
@@ -1095,6 +1096,11 @@ private:
     ChainstateManager& chainman() { return *Assert(m_node.chainman); }
 public:
     explicit ChainImpl(NodeContext& node) : m_node(node) {}
+    std::optional<bool> hasSaplingNullifier(const uint256& nullifier) override
+    {
+        if (!m_node.chain_helper || !m_node.chain_helper->sapling_state) return std::nullopt;
+        return m_node.chain_helper->sapling_state->HasNullifier(nullifier);
+    }
     std::optional<int> getHeight() override
     {
         LOCK(::cs_main);

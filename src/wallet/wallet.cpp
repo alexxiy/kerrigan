@@ -1892,6 +1892,53 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
     return applied;
 }
 
+void CWallet::RepairStaleSaplingSpends()
+{
+    AssertLockHeld(cs_wallet);
+
+    // (cmu, nullifier, spendingTxid) for every note currently flagged spent.
+    std::vector<std::tuple<uint256, uint256, uint256>> candidates;
+    for (const auto& [cmu, nd] : m_sapling_key_manager.GetAllNotes()) {
+        if (!nd.isSpent) continue;
+        if (nd.nullifier.IsNull() || nd.spendingTxid.IsNull()) continue;
+        candidates.emplace_back(cmu, nd.nullifier, nd.spendingTxid);
+    }
+    if (candidates.empty()) return;
+
+    std::set<uint256> releasable;
+    for (const auto& [cmu, nullifier, spendingTxid] : candidates) {
+        // 1. The chain is the authority. Only a definite "absent" is evidence.
+        const std::optional<bool> spent_on_chain{chain().hasSaplingNullifier(nullifier)};
+        if (!spent_on_chain.has_value()) continue;  // cannot tell: never release
+        if (*spent_on_chain) continue;              // really spent: leave it alone
+
+        // 2. Never release a transaction the wallet does not know about. A
+        //    shielded-only spend seen in a block is not added to mapWallet, so
+        //    its absence says nothing about whether it happened.
+        const auto it = mapWallet.find(spendingTxid);
+        if (it == mapWallet.end()) continue;
+
+        // 3. Do not touch a spend that is still live. A mempool spend has its
+        //    nullifier in the mempool set, not the chain set, so step 1 alone
+        //    would treat it as absent.
+        const CWalletTx& wtx = it->second;
+        if (wtx.InMempool() || GetTxDepthInMainChain(wtx) > 0) continue;
+
+        releasable.insert(spendingTxid);
+    }
+    if (releasable.empty()) return;
+
+    WalletBatch batch(GetDatabase());
+    size_t released = 0;
+    for (const uint256& txid : releasable) {
+        released += m_sapling_key_manager.UnmarkSpentBy(txid, &batch);
+    }
+    if (released) {
+        WalletLogPrintf("Sapling: released %u note(s) whose nullifier is absent from the chain "
+                        "and whose spending tx never confirmed\n", (unsigned)released);
+    }
+}
+
 void CWallet::MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config)
 {
     // Guided repair (WS-HEAL v2 6.4.b) re-arms the one-shot check and
@@ -1938,6 +1985,10 @@ void CWallet::MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config)
         LOCK(cs_wallet);
 
         if (m_sapling_key_manager.IsEmpty()) return;
+
+        // A note wrongly left flagged spent is invisible to DetectStaleWitnesses,
+        // so repair before measuring staleness.
+        RepairStaleSaplingSpends();
 
         tipHeight = m_last_block_processed_height;
         auto stale = m_sapling_key_manager.DetectStaleWitnesses(tipHeight);

@@ -707,6 +707,19 @@ public:
     void MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config = false);
 
     /**
+     * Release notes marked spent by a transaction that provably never happened.
+     *
+     * The Sapling nullifier set on the active chain is the only authority on
+     * whether a note was really spent. A note is released ONLY when the chain
+     * can positively confirm its nullifier is absent. If that cannot be
+     * determined, or the wallet does not know the spending transaction, or that
+     * transaction is still live, the note is left alone. Erring towards "still
+     * spent" hides funds until the next check; erring the other way invents
+     * them.
+     */
+    void RepairStaleSaplingSpends() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
      * Body of the detached background rebuilder.
      *
      * Holds a shared_ptr to the wallet so the thread can outlive the caller;
