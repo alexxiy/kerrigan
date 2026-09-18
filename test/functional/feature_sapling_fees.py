@@ -99,6 +99,10 @@ class SaplingFeeTest(BitcoinTestFramework):
         self.log.info("Test 4: z→z auto fee scales correctly")
         z_addr_1 = node1.z_getnewaddress()
         send_amount = Decimal("2.0")
+        # Measure the wallet TOTAL, not one address. A z->z send puts the
+        # change at an internal address, so a per-address subtraction counts
+        # the user's own change as though it were fee.
+        z_total_before = Decimal(node0.z_getbalance())
         z_bal_before = Decimal(node0.z_getbalance(z_addr))
         txid4 = node0.z_sendmany(
             z_addr,
@@ -113,7 +117,8 @@ class SaplingFeeTest(BitcoinTestFramework):
 
         # Fee = base + nSpends * per_spend + (nShieldedOutputs + 1) * per_output
         # nSpends depends on how many notes the wallet selects (may be 1 or 2)
-        actual_fee = z_bal_before - send_amount - z_bal_after
+        z_total_after = Decimal(node0.z_getbalance())
+        actual_fee = z_total_before - send_amount - z_total_after
         self.log.info("  z→z actual fee = %s, remaining = %s", actual_fee, z_bal_after)
         # Fee should be at least the base (0.0001) and not more than a reasonable
         # amount for a few spends/outputs
