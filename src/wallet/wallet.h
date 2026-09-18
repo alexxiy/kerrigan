@@ -707,6 +707,13 @@ public:
     void MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config = false);
 
     /**
+     * Release Sapling notes whose spending transaction is neither confirmed
+     * nor in the mempool. Without this a spend that never lands (conflicted by
+     * a reorg, evicted, replaced) leaves its notes permanently unspendable.
+     */
+    void RepairStaleSaplingSpends() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
      * Body of the detached background rebuilder.
      *
      * Holds a shared_ptr to the wallet so the thread can outlive the caller;

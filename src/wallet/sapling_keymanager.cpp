@@ -1395,6 +1395,22 @@ SaplingKeyManager::DetectStaleWitnesses(int walletTipHeight) const
     return stale;
 }
 
+size_t SaplingKeyManager::UnmarkSpentBy(const uint256& spendingTxid, WalletBatch* batch)
+{
+    LOCK(cs);
+    size_t unmarked = 0;
+    for (auto& [key, nd] : mapSaplingNotes) {
+        if (!nd.isSpent || nd.spendingTxid != spendingTxid) continue;
+        nd.isSpent = false;
+        nd.spendingTxid.SetNull();
+        if (batch) batch->WriteSaplingNote(key, nd);
+        ++unmarked;
+        LogPrint(BCLog::SAPLING, "SaplingKeyManager::UnmarkSpentBy: note %s released by %s\n",
+                  key.ToString(), spendingTxid.ToString());
+    }
+    return unmarked;
+}
+
 void SaplingKeyManager::RewindBlock(int height, const CBlock& block, WalletBatch* batch)
 {
     LOCK(cs);
