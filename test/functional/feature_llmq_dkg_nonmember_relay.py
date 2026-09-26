@@ -18,8 +18,9 @@ discourage filters were cleared by hand.
 
 The test crafts a contribution for the live session with a proTxHash that is
 not a member, sends it from a test peer during the contribution phase, and
-waits for the node to log that it skipped the message. It then asserts no ban
-was issued. A malformed contribution sent afterwards must still be punished,
+waits for the node to log that it skipped the message, naming the rejected
+proTxHash so operators can see which member their view disputes. It then
+asserts no ban was issued. A malformed contribution sent afterwards must still be punished,
 which proves the harness can observe a ban at all.
 """
 
@@ -45,12 +46,12 @@ class msg_qcontrib_raw:
         return self.data
 
 
-def nonmember_contribution(quorum_hash):
+def nonmember_contribution(quorum_hash, pro_tx_hash):
     """A contribution that deserializes cleanly (all-zero BLS objects are null,
     not malformed) and fails preverification only on membership."""
     data = bytes([LLMQ_TEST])
     data += ser_uint256(int(quorum_hash, 16))
-    data += os.urandom(32)                    # proTxHash: not a member
+    data += ser_uint256(int(pro_tx_hash, 16))
     data += ser_compact_size(0)               # vvec
     data += bytes(BLS_PUBKEY_SIZE)            # contributions.ephemeralPubKey
     data += bytes(32)                         # contributions.ivSeed
@@ -91,15 +92,16 @@ class LLMQDKGNonMemberRelay(KerriganTestFramework):
                                    llmq_type_name=llmq_type_name)
 
         self.log.info("A contribution from a non-member is dropped without punishing the relayer")
+        stranger = os.urandom(32).hex()
         relayer = target.add_p2p_connection(P2PInterface())
         # "skipping" is logged after the ban decision for the same message, so
         # once it appears a ban line would already have been written.
         with target.assert_debug_log(
-                expected_msgs=["contributor not a member of this quorum",
+                expected_msgs=["contributor %s not a member of this quorum" % stranger,
                                "skipping message due to failed preverification"],
                 unexpected_msgs=["banning node due to failed preverification"],
                 timeout=30):
-            relayer.send_message(msg_qcontrib_raw(nonmember_contribution(q)))
+            relayer.send_message(msg_qcontrib_raw(nonmember_contribution(q, stranger)))
         assert relayer.is_connected
         target.disconnect_p2ps()
 
@@ -108,7 +110,7 @@ class LLMQDKGNonMemberRelay(KerriganTestFramework):
         with target.assert_debug_log(
                 expected_msgs=["failed to deserialize message", "DISCOURAGE THRESHOLD EXCEEDED"],
                 timeout=30):
-            sender.send_message(msg_qcontrib_raw(nonmember_contribution(q)[:40]))
+            sender.send_message(msg_qcontrib_raw(nonmember_contribution(q, os.urandom(32).hex())[:40]))
         target.disconnect_p2ps()
 
 

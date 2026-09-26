@@ -168,7 +168,7 @@ bool CDKGSession::PreVerifyMessage(const CDKGContribution& qc, bool& retBan) con
         // author, and it relayed the message because its own view of the quorum counts the
         // author as a member. Banning it for that disagreement discouraged honest masternodes
         // on mainnet every DKG round and took the quorum mesh down with them.
-        logger.Batch("contributor not a member of this quorum, rejecting contribution");
+        logger.Batch("contributor %s not a member of this quorum, rejecting contribution", qc.proTxHash.ToString());
         return false;
     }
 
@@ -301,7 +301,7 @@ bool CDKGSession::PreVerifyMessage(const CDKGComplaint& qc, bool& retBan) const
     auto* member = GetMember(qc.proTxHash);
     if (member == nullptr) {
         // Drop, but don't ban the relayer; see the contribution case.
-        logger.Batch("complainer not a member of this quorum, rejecting complaint");
+        logger.Batch("complainer %s not a member of this quorum, rejecting complaint", qc.proTxHash.ToString());
         return false;
     }
 
@@ -413,7 +413,7 @@ bool CDKGSession::PreVerifyMessage(const CDKGJustification& qj, bool& retBan) co
     auto* member = GetMember(qj.proTxHash);
     if (member == nullptr) {
         // Drop, but don't ban the relayer; see the contribution case.
-        logger.Batch("justifier not a member of this quorum, rejecting justification");
+        logger.Batch("justifier %s not a member of this quorum, rejecting justification", qj.proTxHash.ToString());
         return false;
     }
 
@@ -598,7 +598,7 @@ bool CDKGSession::PreVerifyMessage(const CDKGPrematureCommitment& qc, bool& retB
     auto* member = GetMember(qc.proTxHash);
     if (member == nullptr) {
         // Drop, but don't ban the relayer; see the contribution case.
-        logger.Batch("committer not a member of this quorum, rejecting premature commitment");
+        logger.Batch("committer %s not a member of this quorum, rejecting premature commitment", qc.proTxHash.ToString());
         return false;
     }
 
