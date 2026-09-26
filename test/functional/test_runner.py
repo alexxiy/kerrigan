@@ -151,6 +151,7 @@ BASE_SCRIPTS = [
     'feature_llmq_dkgerrors.py', # NOTE: needs dash_hash to pass
     'feature_llmq_dkg_burst.py', # v1.3.2 burst tolerance; NOTE: needs dash_hash to pass
     'feature_llmq_dkg_late_contribution.py', # late-contribution contract; NOTE: needs dash_hash to pass
+    'feature_llmq_dkg_nonmember_relay.py', # non-member DKG message does not discourage the relayer
     'feature_masternode_status_dkg.py', # v1.3.3 masternode operator status/log hardening
     'feature_hmp_rearm_activation.py', # v1.3.2 CCbTx v6 activation straddle
     'feature_hmp_rearm_soak.py', # v1.3.2 multi-cycle burst+rearm soak; NOTE: needs dash_hash to pass
