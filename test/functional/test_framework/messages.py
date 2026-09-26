@@ -71,11 +71,12 @@ DEFAULT_DESCENDANT_LIMIT = 25  # default max number of in-mempool descendants
 # Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN, +2 for the pushdata opcodes.
 MAX_OP_RETURN_RELAY = 83
 
+# Must match pchMessageStart in src/chainparams.cpp.
 MAGIC_BYTES = {
-    "mainnet": b"\xbf\x0c\x6b\xbd",   # mainnet
-    "testnet3": b"\xce\xe2\xca\xff",  # testnet3
-    "regtest": b"\xfc\xc1\xb7\xdc",   # regtest
-    "devnet": b"\xe2\xca\xff\xce",    # devnet
+    "mainnet": b"KRGN",               # mainnet
+    "testnet3": b"krgt",              # testnet3
+    "regtest": b"krgr",               # regtest
+    "devnet": b"\x1d\x54\x3b\x94",    # devnet
 }
 
 def sha256(s):
