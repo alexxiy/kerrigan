@@ -168,14 +168,16 @@ RPCHelpMan z_getnewaddress()
 RPCHelpMan z_getbalance()
 {
     return RPCHelpMan{"z_getbalance",
-        "\nReturns the balance of a shielded address.\n"
+        "\nReturns the balance of a shielded address: notes received at that exact address, plus\n"
+        "change from sends made from it (the wallet sends change to an internal ZIP 316 address).\n"
+        "This is the amount z_sendmany can spend from the address.\n"
         "If no address is given, returns total shielded balance.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "The shielded address. If not provided, returns total shielded balance."},
             {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, "Only include notes with at least this many confirmations."},
         },
         RPCResult{
-            RPCResult::Type::STR_AMOUNT, "amount", "The total amount received at this address"
+            RPCResult::Type::STR_AMOUNT, "amount", "The balance spendable from this address"
         },
         RPCExamples{
             HelpExampleCli("z_getbalance", "\"ks1...\"")
@@ -555,6 +557,12 @@ RPCHelpMan z_sendmany()
                     fee = estimatedFee;
                 }
 
+                // A selected note may belong to the source key's internal
+                // (change) key, so spend each with the key for its own IVK.
+                std::map<sapling::SaplingIncomingViewingKey, sapling::SaplingExtendedSpendingKey> noteKeys;
+                auto noteKeys_guard = std::unique_ptr<void, std::function<void(void*)>>(
+                    (void*)1, [&](void*) { for (auto& [ivk, k] : noteKeys) memory_cleanse(k.key.data(), k.key.size()); });
+
                 CAmount noteTotal = 0;
                 for (const auto& [cmu, note] : notesKeyed) {
                     if (noteTotal >= totalSend + fee) break;
@@ -583,7 +591,17 @@ RPCHelpMan z_sendmany()
                     std::copy(note.recipient.d.begin(), note.recipient.d.end(), recipientArr.begin());
                     std::copy(note.recipient.pk_d.begin(), note.recipient.pk_d.end(), recipientArr.begin() + 11);
 
-                    if (!builder.AddSaplingSpend(*sk, recipientArr, note.value, note.rseed, merklePathArr)) {
+                    auto keyIt = noteKeys.find(note.ivk);
+                    if (keyIt == noteKeys.end()) {
+                        auto noteSk = km.GetSpendingKey(note.ivk);
+                        if (!noteSk) {
+                            throw JSONRPCError(RPC_WALLET_ERROR, "Spending key not found for a selected note");
+                        }
+                        keyIt = noteKeys.emplace(note.ivk, *noteSk).first;
+                        memory_cleanse(noteSk->key.data(), noteSk->key.size());
+                    }
+
+                    if (!builder.AddSaplingSpend(keyIt->second, recipientArr, note.value, note.rseed, merklePathArr)) {
                         throw JSONRPCError(RPC_WALLET_ERROR,
                             "Failed to add Sapling spend (anchor mismatch or invalid witness)");
                     }

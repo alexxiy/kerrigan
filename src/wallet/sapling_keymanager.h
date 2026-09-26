@@ -43,6 +43,9 @@ private:
     /** Map from IVK -> set of payment addresses derived from that IVK */
     std::map<sapling::SaplingIncomingViewingKey, std::set<sapling::SaplingPaymentAddress>> mapIvkToAddresses GUARDED_BY(cs);
 
+    /** The ZIP 316 internal IVKs of every tracked key, derived from viewing keys (works while locked). */
+    std::set<sapling::SaplingIncomingViewingKey> InternalIvks() const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     /** Map from payment address -> IVK (reverse lookup) */
     std::map<sapling::SaplingPaymentAddress, sapling::SaplingIncomingViewingKey> mapAddressToIvk GUARDED_BY(cs);
 
@@ -162,6 +165,12 @@ public:
      * Returns nullopt if no spending key is available (watch-only or unknown).
      */
     std::optional<sapling::SaplingExtendedSpendingKey> GetSpendingKey(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Get the extended spending key for an IVK, e.g. the key for a note's own
+     * IVK. Returns nullopt if the IVK has no spending key or the wallet is locked.
+     */
+    std::optional<sapling::SaplingExtendedSpendingKey> GetSpendingKey(const sapling::SaplingIncomingViewingKey& ivk) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
      * Get the full viewing key for a payment address.
@@ -335,12 +344,22 @@ public:
     std::vector<SaplingNoteData> GetUnspentNotes() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
-     * All confirmed unspent notes for a specific payment address (excludes reserved).
+     * All confirmed unspent notes belonging to a payment address (excludes reserved):
+     * notes received at exactly @p addr, plus change from sends made from @p addr.
+     *
+     * Change goes to the key's ZIP 316 internal address, not back to the source,
+     * so without the second half a z->z send leaves the source reading zero and
+     * unable to spend its own change. Other diversified addresses of the same key
+     * are deliberately NOT included: services hand out one address per customer
+     * and credit deposits by address, so a key-wide answer would credit every
+     * customer with the whole wallet.
      */
     std::vector<SaplingNoteData> GetUnspentNotes(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
-     * Unspent notes with their cmu keys, for reservation tracking.
+     * As GetUnspentNotes(addr), with the cmu keys for reservation tracking.
+     * A note may belong to the internal key, so spend it with the key for
+     * its own recipient, not the source address's key.
      */
     std::vector<std::pair<uint256, SaplingNoteData>> GetUnspentNotesWithKeys(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 

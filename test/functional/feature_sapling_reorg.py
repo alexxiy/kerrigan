@@ -145,12 +145,10 @@ class SaplingReorgTest(BitcoinTestFramework):
         bal_1_after_send = Decimal(node1.z_getbalance(z_addr_1))
         self.log.info("  Node0 z-bal: %s, Node1 z-bal: %s", bal_0_after_send, bal_1_after_send)
         assert_equal(bal_1_after_send, zz_amount)
-        # Node0's change went to a ZIP-316 internal address, so the source
-        # address reads zero and the change is only visible in the total.
-        assert_equal(bal_0_after_send, Decimal("0"))
-        total_0_after_send = Decimal(node0.z_getbalance())
-        assert total_0_after_send < shield_amount
-        assert total_0_after_send > Decimal("0"), "Node0 should still hold the change note"
+        # Node0's change went to the key's ZIP-316 internal address; it is
+        # spendable from, and so counted at, the source address.
+        assert bal_0_after_send < shield_amount
+        assert bal_0_after_send > Decimal("0"), "the source address should show its change"
 
         # Invalidate the z->z block
         self.log.info("  Invalidating z->z block %d", zz_height)
@@ -187,22 +185,6 @@ class SaplingReorgTest(BitcoinTestFramework):
         assert_equal(Decimal(node0.z_getbalance(z_addr_0)), bal_0_after_send)
         assert_equal(Decimal(node1.z_getbalance(z_addr_1)), zz_amount)
         self.log.info("  Balances restored after reconsiderblock")
-
-        # ================================================================
-        # Scenario 3 onwards: SKIPPED pending #273
-        # ================================================================
-        # Every remaining scenario sends again from z_addr_0, which is correct
-        # usage, but that address holds no notes after the z->z above: the change
-        # went to an internal ZIP-316 address and z_sendmany's source selection
-        # only looks at the exact address named, so the call fails with
-        # "Insufficient shielded funds. Have 0.00" while z_getbalance() reports
-        # the full balance. That is a product defect (#273), not a test bug.
-        # Deliberately NOT worked around by spending from the internal change
-        # address, which would make these pass while hiding it. Scenarios 1 and 2
-        # above still run and cover invalidate/reconsider of t->z and z->z.
-        self.log.info("Scenario 3 onwards: SKIPPED pending #273 "
-                      "(cannot spend from own address after z->z)")
-        return
 
         self.log.info("Scenario 3: Competing chain fork -- Sapling tx on loser chain")
 
@@ -248,24 +230,31 @@ class SaplingReorgTest(BitcoinTestFramework):
         assert_equal(node0_height_after, node1_height_before)
         self.log.info("  Node0 reorged to height %d", node0_height_after)
 
-        # Node0's fork Sapling tx should be reverted
+        # The fork tx is still valid on the winning chain, so the reorg puts it
+        # back in the mempool, and its input note stays spent while it is live
+        # (as in Scenario 2). Both addresses are the same key, and the only
+        # outputs are unconfirmed, so nothing is spendable yet.
+        assert txid_fork in node0.getrawmempool(), \
+            "the orphaned fork tx should be back in the mempool"
         bal_0_after_reorg = Decimal(node0.z_getbalance(z_addr_0))
-        bal_0b_after_reorg = Decimal(node0.z_getbalance(z_addr_0b))
-        self.log.info("  Node0 z_addr_0 bal: %s, z_addr_0b bal: %s",
-                      bal_0_after_reorg, bal_0b_after_reorg)
-        # The original note balance should be restored (fork tx reverted)
-        assert_equal(bal_0_after_reorg, pre_fork_bal_0)
-        assert_equal(bal_0b_after_reorg, Decimal("0"))
-        self.log.info("  Fork Sapling tx reverted -- original balance restored")
+        self.log.info("  Node0 z_addr_0 bal while the fork tx is pending: %s", bal_0_after_reorg)
+        assert_equal(bal_0_after_reorg, Decimal("0"))
+
+        # Mined on the winning chain, the same spend lands again: the balance
+        # is what the short chain showed, and the 1.0 note is at z_addr_0b.
+        self.generatetoaddress(node0, 1, t_addr_0)
+        self.sync_all()
+        assert_equal(Decimal(node0.z_getbalance(z_addr_0)), bal_0_short)
+        received = node0.z_listunspent(1, 9999999, [z_addr_0b])
+        assert_equal([Decimal(str(u["amount"])) for u in received], [fork_amount])
+        self.log.info("  Fork Sapling tx re-mined on the winning chain")
 
         # ================================================================
         # Scenario 4: Competing chains -- t->z on WINNER chain survives
         # ================================================================
         self.log.info("Scenario 4: Competing chain -- Sapling tx on winner survives")
 
-        # After Scenario 3's reorg, node0 may have the reverted fork tx in its
-        # mempool. This tx references Sapling anchors from the orphaned chain
-        # and cannot propagate to node1. We need to clear it before syncing.
+        # Clear anything still pending on node0 before syncing.
         mempool_0 = node0.getrawmempool()
         if mempool_0:
             self.log.info("  Clearing %d stale txs from node0 mempool via mining", len(mempool_0))

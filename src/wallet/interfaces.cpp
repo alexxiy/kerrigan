@@ -757,6 +757,12 @@ public:
                 txFee = estimatedFee;
             }
 
+            // A selected note may belong to the source key's internal
+            // (change) key, so spend each with the key for its own IVK.
+            std::map<sapling::SaplingIncomingViewingKey, sapling::SaplingExtendedSpendingKey> noteKeys;
+            auto noteKeys_guard = std::unique_ptr<void, std::function<void(void*)>>(
+                (void*)1, [&](void*) { for (auto& [ivk, k] : noteKeys) memory_cleanse(k.key.data(), k.key.size()); });
+
             // Select notes
             CAmount noteTotal = 0;
             for (const auto& note : notes) {
@@ -783,7 +789,17 @@ public:
                 std::copy(note.recipient.d.begin(), note.recipient.d.end(), recipientArr.begin());
                 std::copy(note.recipient.pk_d.begin(), note.recipient.pk_d.end(), recipientArr.begin() + 11);
 
-                if (!builder.AddSaplingSpend(*sk, recipientArr, note.value, note.rseed, merklePathArr)) {
+                auto keyIt = noteKeys.find(note.ivk);
+                if (keyIt == noteKeys.end()) {
+                    auto noteSk = km.GetSpendingKey(note.ivk);
+                    if (!noteSk) {
+                        throw std::runtime_error("Spending key not found for a selected note");
+                    }
+                    keyIt = noteKeys.emplace(note.ivk, *noteSk).first;
+                    memory_cleanse(noteSk->key.data(), noteSk->key.size());
+                }
+
+                if (!builder.AddSaplingSpend(keyIt->second, recipientArr, note.value, note.rseed, merklePathArr)) {
                     throw std::runtime_error("Failed to add Sapling spend");
                 }
                 noteTotal += note.value;

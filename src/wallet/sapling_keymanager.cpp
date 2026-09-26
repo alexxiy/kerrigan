@@ -23,6 +23,7 @@
 #include <support/cleanse.h>
 
 #include <cstring>
+#include <functional>
 #include <string>
 
 namespace wallet {
@@ -351,6 +352,14 @@ std::optional<sapling::SaplingExtendedSpendingKey> SaplingKeyManager::GetSpendin
     auto ivkIt = mapAddressToIvk.find(addr);
     if (ivkIt == mapAddressToIvk.end()) return std::nullopt;
     auto skIt = mapIvkToExtSk.find(ivkIt->second);
+    if (skIt == mapIvkToExtSk.end()) return std::nullopt;
+    return skIt->second;
+}
+
+std::optional<sapling::SaplingExtendedSpendingKey> SaplingKeyManager::GetSpendingKey(const sapling::SaplingIncomingViewingKey& ivk) const
+{
+    LOCK(cs);
+    auto skIt = mapIvkToExtSk.find(ivk);
     if (skIt == mapIvkToExtSk.end()) return std::nullopt;
     return skIt->second;
 }
@@ -1268,14 +1277,39 @@ std::vector<SaplingNoteData> SaplingKeyManager::GetUnspentNotes() const
     return result;
 }
 
+std::set<sapling::SaplingIncomingViewingKey> SaplingKeyManager::InternalIvks() const
+{
+    AssertLockHeld(cs);
+    std::set<sapling::SaplingIncomingViewingKey> result;
+    for (const auto& [ivk, fvk] : mapIvkToFvk) {
+        auto dkIt = mapIvkToDk.find(ivk);
+        if (dkIt == mapIvkToDk.end()) continue;
+
+        std::array<uint8_t, 96> fvk_bytes;
+        ByteArrayCleanser<96> fvk_guard(fvk_bytes);
+        std::copy(fvk.ak.begin(), fvk.ak.end(), fvk_bytes.begin());
+        std::copy(fvk.nk.begin(), fvk.nk.end(), fvk_bytes.begin() + 32);
+        std::copy(fvk.ovk.begin(), fvk.ovk.end(), fvk_bytes.begin() + 64);
+        try {
+            auto internal = sapling::zip32::derive_internal_fvk(fvk_bytes, dkIt->second);
+            ByteArrayCleanser<96> internal_fvk_guard(internal.fvk);
+            ByteArrayCleanser<32> internal_dk_guard(internal.dk);
+            sapling::SaplingIncomingViewingKey internalIvk;
+            internalIvk.key = sapling::zip32::fvk_to_ivk(internal.fvk);
+            // An internal key's own derivation is not tracked; keep only keys the wallet scans for.
+            if (!(internalIvk == ivk) && mapIvkToFvk.count(internalIvk)) result.insert(internalIvk);
+        } catch (const std::exception& e) {
+            LogPrint(BCLog::SAPLING, "SaplingKeyManager::%s: internal key derivation failed: %s\n", __func__, e.what());
+        }
+    }
+    return result;
+}
+
 std::vector<SaplingNoteData> SaplingKeyManager::GetUnspentNotes(const sapling::SaplingPaymentAddress& addr) const
 {
-    LOCK(cs);
     std::vector<SaplingNoteData> result;
-    for (const auto& [key, nd] : mapSaplingNotes) {
-        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && nd.recipient == addr && !m_reservedNotes.count(key)) {
-            result.push_back(nd);
-        }
+    for (auto& [key, nd] : GetUnspentNotesWithKeys(addr)) {
+        result.push_back(std::move(nd));
     }
     return result;
 }
@@ -1283,9 +1317,39 @@ std::vector<SaplingNoteData> SaplingKeyManager::GetUnspentNotes(const sapling::S
 std::vector<std::pair<uint256, SaplingNoteData>> SaplingKeyManager::GetUnspentNotesWithKeys(const sapling::SaplingPaymentAddress& addr) const
 {
     LOCK(cs);
+    const auto internalIvks = InternalIvks();
+
+    // Our notes spent by each transaction: a change note's source is the
+    // address that funded the transaction that created it.
+    std::map<uint256, std::vector<const SaplingNoteData*>> inputsByTxid;
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        if (nd.isSpent && !nd.spendingTxid.IsNull()) inputsByTxid[nd.spendingTxid].push_back(&nd);
+    }
+
+    // The address a note belongs to: its recipient, or for change on an
+    // internal address, the single address whose notes paid for it (following
+    // change of change). Unattributable change (inputs from several addresses,
+    // or none of ours) belongs to no external address and stays reachable
+    // through its own internal address and the wallet total.
+    std::function<std::optional<sapling::SaplingPaymentAddress>(const SaplingNoteData&, int)> owner =
+        [&](const SaplingNoteData& nd, int depth) -> std::optional<sapling::SaplingPaymentAddress> {
+        if (!internalIvks.count(nd.ivk)) return nd.recipient;
+        if (depth >= 32) return std::nullopt;
+        auto it = inputsByTxid.find(nd.txid);
+        if (it == inputsByTxid.end()) return std::nullopt;
+        std::optional<sapling::SaplingPaymentAddress> source;
+        for (const SaplingNoteData* input : it->second) {
+            auto inputOwner = owner(*input, depth + 1);
+            if (!inputOwner || (source && !(*source == *inputOwner))) return std::nullopt;
+            source = inputOwner;
+        }
+        return source;
+    };
+
     std::vector<std::pair<uint256, SaplingNoteData>> result;
     for (const auto& [key, nd] : mapSaplingNotes) {
-        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && nd.recipient == addr && !m_reservedNotes.count(key)) {
+        if (nd.isSpent || nd.blockHeight < 0 || nd.witnessData.empty() || m_reservedNotes.count(key)) continue;
+        if (nd.recipient == addr || (internalIvks.count(nd.ivk) && owner(nd, 0) == addr)) {
             result.emplace_back(key, nd);
         }
     }
