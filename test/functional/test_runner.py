@@ -197,6 +197,8 @@ BASE_SCRIPTS = [
     'rpc_invalid_address_message.py',
     'interface_bitcoin_cli.py --legacy-wallet',
     'interface_bitcoin_cli.py --descriptors',
+    'interface_kerrigan_cli_sapling.py --legacy-wallet',
+    'interface_kerrigan_cli_sapling.py --descriptors',
     'feature_bind_extra.py',
     'mempool_resurrect.py',
     'wallet_txn_doublespend.py --mineblock',

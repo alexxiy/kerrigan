@@ -87,8 +87,9 @@ class HelpRpcTest(BitcoinTestFramework):
 
         for argname, convert in converts_by_argname.items():
             if all(convert) != any(convert):
-                # Only allow dummy to fail consistency check
-                assert argname == 'dummy', ('WARNING: conversion mismatch for argument named %s (%s)' % (argname, list(zip(all_methods_by_argname[argname], converts_by_argname[argname]))))
+                # Only allow dummy to fail consistency check, and rescan: z_importkey and
+                # z_importviewingkey take it as "yes", "no" or "whenkeyisnew", as in zcashd.
+                assert argname in ('dummy', 'rescan'), ('WARNING: conversion mismatch for argument named %s (%s)' % (argname, list(zip(all_methods_by_argname[argname], converts_by_argname[argname]))))
 
     def test_categories(self):
         node = self.nodes[0]
@@ -105,7 +106,7 @@ class HelpRpcTest(BitcoinTestFramework):
         # command titles
         titles = [line[3:-3] for line in node.help().splitlines() if line.startswith('==')]
 
-        components = ['Addressindex', 'Blockchain', 'Control', 'Kerrigan', 'Evo', 'Mining', 'Network', 'Rawtransactions', 'Util']
+        components = ['Addressindex', 'Blockchain', 'Control', 'Kerrigan', 'Evo', 'Hmp', 'Mining', 'Network', 'Rawtransactions', 'Recovery', 'Util']
 
         if self.is_wallet_compiled():
             components.append('Wallet')
