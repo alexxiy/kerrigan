@@ -149,7 +149,7 @@ public:
 
     // Send a shielded transaction via z_sendmany
     QString saplingZSendMany(const QString& from,
-                             const QList<QPair<QString, CAmount>>& recipients,
+                             const std::vector<interfaces::Wallet::SaplingSendRecipient>& recipients,
                              int minconf = 1);
 
     static bool isWalletEnabled();

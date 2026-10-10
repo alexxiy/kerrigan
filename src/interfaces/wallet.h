@@ -264,9 +264,17 @@ public:
     //! Get all shielded notes (spent + unspent) for the history view.
     virtual std::vector<ShieldedNoteInfo> getShieldedNoteHistory() = 0;
 
+    //! A recipient of saplingZSendMany.
+    struct SaplingSendRecipient {
+        std::string address;
+        CAmount amount{0};
+        //! Memo for a shielded recipient, at most 512 bytes. Must be empty for a transparent one.
+        std::vector<uint8_t> memo;
+    };
+
     //! Send a Sapling z_sendmany transaction. Returns txid on success, throws on error.
     virtual std::string saplingZSendMany(const std::string& from_address,
-        const std::vector<std::pair<std::string, CAmount>>& recipients,
+        const std::vector<SaplingSendRecipient>& recipients,
         int minconf = 1,
         std::optional<CAmount> fee = std::nullopt) = 0;
 

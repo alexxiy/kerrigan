@@ -41,6 +41,10 @@ public:
 
     bool fSubtractFeeFromAmount; // memory only
 
+    // Memo text for a shielded recipient, sent encrypted with the payment.
+    // Memory only, so saved payment requests keep their format.
+    QString memo;
+
     static const int CURRENT_VERSION = 1;
     int nVersion;
 

@@ -219,6 +219,7 @@ BITCOIN_TESTS += \
   wallet/test/psbt_wallet_tests.cpp \
   wallet/test/spend_tests.cpp \
   wallet/test/wallet_tests.cpp \
+  wallet/test/sapling_send_tests.cpp \
   wallet/test/walletdb_tests.cpp \
   wallet/test/wallet_crypto_tests.cpp \
   wallet/test/wallet_transaction_tests.cpp \

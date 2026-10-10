@@ -4,13 +4,13 @@
 #ifndef KERRIGAN_QT_SHIELDEDSENDWORKER_H
 #define KERRIGAN_QT_SHIELDEDSENDWORKER_H
 
-#include <consensus/amount.h>
+#include <interfaces/wallet.h>
 
-#include <QList>
 #include <QObject>
-#include <QPair>
 #include <QPointer>
 #include <QString>
+
+#include <vector>
 
 class WalletModel;
 
@@ -26,7 +26,7 @@ class ShieldedSendWorker : public QObject
 public:
     ShieldedSendWorker(WalletModel* model,
                        const QString& from,
-                       const QList<QPair<QString, CAmount>>& recipients,
+                       const std::vector<interfaces::Wallet::SaplingSendRecipient>& recipients,
                        int minconf = 1,
                        QObject* parent = nullptr);
 
@@ -40,7 +40,7 @@ Q_SIGNALS:
 private:
     QPointer<WalletModel> m_model;
     QString m_from;
-    QList<QPair<QString, CAmount>> m_recipients;
+    std::vector<interfaces::Wallet::SaplingSendRecipient> m_recipients;
     int m_minconf;
 };
 

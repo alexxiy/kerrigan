@@ -175,6 +175,29 @@
     </layout>
   </item>
   <item row="3" column="0">
+    <widget class="QLabel" name="memoLabel">
+    <property name="text">
+      <string>Mem&amp;o:</string>
+    </property>
+    <property name="alignment">
+      <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+    </property>
+    <property name="buddy">
+      <cstring>memoEdit</cstring>
+    </property>
+    </widget>
+  </item>
+  <item row="3" column="1">
+    <widget class="QValidatedLineEdit" name="memoEdit">
+    <property name="toolTip">
+      <string>Text for the recipient, sent encrypted with the payment. Only the recipient can read it. Up to 512 bytes.</string>
+    </property>
+    <property name="placeholderText">
+      <string>Optional text for the recipient, such as an order number</string>
+    </property>
+    </widget>
+  </item>
+  <item row="4" column="0">
     <widget class="QLabel" name="messageLabel">
     <property name="text">
       <string>Message:</string>
@@ -184,7 +207,7 @@
     </property>
     </widget>
   </item>
-  <item row="3" column="1">
+  <item row="4" column="1">
     <widget class="QLabel" name="messageTextLabel">
     <property name="toolTip">
       <string>A message that was attached to the kerrigan: URI which will be stored with the transaction for your reference. Note: This message will not be sent over the Kerrigan network.</string>
@@ -194,7 +217,7 @@
     </property>
     </widget>
   </item>
-  <item row="4" column="0" colspan="2">
+  <item row="5" column="0" colspan="2">
     <widget class="Line" name="line">
     <property name="orientation">
       <enum>Qt::Horizontal</enum>
@@ -223,6 +246,7 @@
   <tabstop>deleteButton</tabstop>
   <tabstop>addAsLabel</tabstop>
   <tabstop>payAmount</tabstop>
+  <tabstop>memoEdit</tabstop>
  </tabstops>
  <resources>
   <include location="../kerrigan.qrc"/>

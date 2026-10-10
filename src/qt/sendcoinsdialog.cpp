@@ -546,11 +546,16 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
         fromAddress = QString::fromStdString(EncodeDestination(bestDest));
     }
 
-    QList<QPair<QString, CAmount>> shieldedRecipients;
+    std::vector<interfaces::Wallet::SaplingSendRecipient> shieldedRecipients;
     CAmount totalAmount = 0;
+    QStringList memoLines;
     for (const auto& rcp : recipients) {
-        shieldedRecipients.append(qMakePair(rcp.address, rcp.amount));
+        const QByteArray memo = rcp.memo.toUtf8();
+        shieldedRecipients.push_back({rcp.address.toStdString(), rcp.amount, std::vector<uint8_t>(memo.begin(), memo.end())});
         totalAmount += rcp.amount;
+        if (!rcp.memo.isEmpty()) {
+            memoLines.append(tr("Memo to %1: %2").arg(rcp.address, rcp.memo));
+        }
     }
 
     // Confirm with user
@@ -560,6 +565,9 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
                      "From: %2\n\n"
                      "Proof generation may take a moment.")
                      .arg(amountStr, fromAddress);
+    if (!memoLines.isEmpty()) {
+        msg += "\n\n" + memoLines.join("\n");
+    }
 
     QMessageBox::StandardButton reply = QMessageBox::question(
         this, tr("Confirm Shielded Send"), msg,

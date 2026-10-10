@@ -39,6 +39,7 @@ SendCoinsEntry::SendCoinsEntry(QWidget* parent) :
     GUIUtil::setFont({ui->payToLabel,
                      ui->labellLabel,
                      ui->amountLabel,
+                     ui->memoLabel,
                      ui->messageLabel}, {GUIUtil::FontWeight::Normal, 15});
 
     GUIUtil::updateFonts();
@@ -83,7 +84,16 @@ void SendCoinsEntry::on_payTo_textChanged(const QString &address)
         ui->payTo->blockSignals(false);
     } else {
         updateLabel(address);
+        updateMemoVisibility(address);
     }
+}
+
+void SendCoinsEntry::updateMemoVisibility(const QString &address)
+{
+    sapling::SaplingPaymentAddress saplingAddr;
+    const bool shielded = DecodeSaplingAddress(address.toStdString(), saplingAddr);
+    ui->memoLabel->setVisible(shielded);
+    ui->memoEdit->setVisible(shielded);
 }
 
 void SendCoinsEntry::setModel(WalletModel *_model)
@@ -108,6 +118,8 @@ void SendCoinsEntry::clear()
     ui->messageTextLabel->clear();
     ui->messageTextLabel->hide();
     ui->messageLabel->hide();
+    ui->memoEdit->clear();
+    updateMemoVisibility(QString());
 
     // update the display unit, to not use the default ("BTC")
     updateDisplayUnit();
@@ -159,6 +171,12 @@ bool SendCoinsEntry::validate(interfaces::Node& node)
         retval = false;
     }
 
+    // A memo is at most 512 bytes of UTF-8
+    if (isSapling && ui->memoEdit->text().toUtf8().size() > 512) {
+        ui->memoEdit->setValid(false);
+        retval = false;
+    }
+
     // Reject dust outputs (only for transparent addresses; shielded outputs have no dust concept):
     if (retval && !isSapling && GUIUtil::isDust(node, address, ui->payAmount->value())) {
         ui->payAmount->setValid(false);
@@ -175,6 +193,8 @@ SendCoinsRecipient SendCoinsEntry::getValue()
     recipient.label = ui->addAsLabel->text();
     recipient.amount = ui->payAmount->value();
     recipient.message = ui->messageTextLabel->text();
+    sapling::SaplingPaymentAddress saplingAddr;
+    recipient.memo = DecodeSaplingAddress(recipient.address.toStdString(), saplingAddr) ? ui->memoEdit->text() : QString();
     recipient.fSubtractFeeFromAmount = (ui->checkboxSubtractFeeFromAmount->checkState() == Qt::Checked);
 
     return recipient;
@@ -185,7 +205,8 @@ QWidget *SendCoinsEntry::setupTabChain(QWidget *prev)
     QWidget::setTabOrder(prev, ui->payTo);
     QWidget::setTabOrder(ui->payTo, ui->addAsLabel);
     QWidget *w = ui->payAmount->setupTabChain(ui->addAsLabel);
-    QWidget::setTabOrder(w, ui->checkboxSubtractFeeFromAmount);
+    QWidget::setTabOrder(w, ui->memoEdit);
+    QWidget::setTabOrder(ui->memoEdit, ui->checkboxSubtractFeeFromAmount);
     QWidget::setTabOrder(ui->checkboxSubtractFeeFromAmount, ui->addressBookButton);
     QWidget::setTabOrder(ui->addressBookButton, ui->pasteButton);
     QWidget::setTabOrder(ui->pasteButton, ui->deleteButton);
@@ -204,9 +225,11 @@ void SendCoinsEntry::setValue(const SendCoinsRecipient &value)
         ui->payTo->setText(recipient.address);
         ui->addAsLabel->setText(recipient.label);
         ui->payAmount->setValue(recipient.amount);
+        ui->memoEdit->setText(recipient.memo);
     }
 
     updateLabel(recipient.address);
+    updateMemoVisibility(recipient.address);
 }
 
 void SendCoinsEntry::setAddress(const QString &address)
