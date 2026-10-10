@@ -154,6 +154,14 @@ build_linux() {
        src/kerrigan-wallet src/kerrigan-util \
        src/qt/kerrigan-qt "$outdir/bin/"
 
+    # The AI swarm coordinator kerrigand runs on a BroodNode (1.4.0 "Nydus").
+    # Built separately by contrib/coordinator/build.sh into COORDINATOR_DIR.
+    local coordinator="${COORDINATOR_DIR:-}/$tag/kerrigan-coordinator"
+    [ -n "${COORDINATOR_DIR:-}" ] && [ -f "$coordinator" ] || \
+        error "kerrigan-coordinator missing for $tag: run contrib/coordinator/build.sh <src> <out> and set COORDINATOR_DIR=<out>"
+    cp "$coordinator" "$outdir/bin/"
+    [ -f "$coordinator.SOURCES" ] && cp "$coordinator.SOURCES" "$outdir/COORDINATOR-SOURCES"
+
     "$strip_cmd" --strip-unneeded "$outdir/bin/"*
 
     # Sanitize qt_prfxpath: Qt embeds the host_prefix path (built into binaries
