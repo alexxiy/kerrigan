@@ -1282,6 +1282,15 @@ public:
         LOCK(m_node.mempool->cs);
         return m_node.mempool->exists(txid);
     }
+    CTransactionRef findTransaction(const uint256& txid, int block_height, uint256& block_hash) override
+    {
+        const Consensus::Params& consensus = chainman().GetConsensus();
+        if (CTransactionRef tx = GetTransaction(/*block_index=*/nullptr, m_node.mempool.get(), txid, consensus, block_hash)) return tx;
+        if (block_height < 0) return nullptr;
+        const CBlockIndex* block_index = WITH_LOCK(::cs_main, return chainman().ActiveChain()[block_height]);
+        if (!block_index) return nullptr;
+        return GetTransaction(block_index, /*mempool=*/nullptr, txid, consensus, block_hash);
+    }
     bool hasDescendantsInMempool(const uint256& txid) override
     {
         if (!m_node.mempool) return false;

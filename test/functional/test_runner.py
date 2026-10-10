@@ -199,6 +199,8 @@ BASE_SCRIPTS = [
     'interface_bitcoin_cli.py --descriptors',
     'interface_kerrigan_cli_sapling.py --legacy-wallet',
     'interface_kerrigan_cli_sapling.py --descriptors',
+    'wallet_sapling_viewtransaction.py --legacy-wallet',
+    'wallet_sapling_viewtransaction.py --descriptors',
     'feature_bind_extra.py',
     'mempool_resurrect.py',
     'wallet_txn_doublespend.py --mineblock',

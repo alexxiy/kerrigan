@@ -363,6 +363,34 @@ public:
      */
     std::vector<std::pair<uint256, SaplingNoteData>> GetUnspentNotesWithKeys(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** A Sapling output of a transaction that the wallet can decrypt. */
+    struct ViewedOutput {
+        /** Index of the OutputDescription within the SaplingTxPayload. */
+        int index{-1};
+        /** True if recovered with an outgoing viewing key (sent, not received). */
+        bool outgoing{false};
+        /** True if paid to one of the wallet's internal (change) addresses. */
+        bool change{false};
+        sapling::SaplingPaymentAddress recipient;
+        CAmount value{0};
+        std::array<uint8_t, 512> memo{};
+    };
+
+    /**
+     * Decrypt every output of @p payload that the wallet can read: with each
+     * incoming viewing key (received, spent or not), and failing that with
+     * each outgoing viewing key (sent). Needs no spending key, so it works
+     * while the wallet is locked and for viewing-key-only wallets. Changes
+     * nothing in the note store.
+     */
+    std::vector<ViewedOutput> ViewOutputs(const SaplingTxPayload& payload,
+                                          int blockHeight,
+                                          const std::string& networkIDStr,
+                                          int saplingHeight) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** The wallet's notes spent by @p payload, each with the index of its SpendDescription. */
+    std::vector<std::pair<int, SaplingNoteData>> NotesSpentBy(const SaplingTxPayload& payload) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     /**
      * Remove notes created by zapped transactions and clear spend state
      * for notes whose spending transaction was zapped.

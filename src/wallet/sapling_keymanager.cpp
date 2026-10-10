@@ -1536,4 +1536,95 @@ void SaplingKeyManager::RewindBlock(int height, const CBlock& block, WalletBatch
     }
 }
 
+std::vector<SaplingKeyManager::ViewedOutput> SaplingKeyManager::ViewOutputs(const SaplingTxPayload& payload,
+                                                                            int blockHeight,
+                                                                            const std::string& networkIDStr,
+                                                                            int saplingHeight) const
+{
+    std::vector<ViewedOutput> result;
+    if (payload.vOutputDescriptions.empty()) return result;
+
+    // Snapshot the keys without holding cs during FFI calls.
+    std::set<sapling::SaplingIncomingViewingKey> ivks;
+    std::set<sapling::SaplingIncomingViewingKey> internalIvks;
+    std::set<std::array<uint8_t, 32>> ovks;
+    {
+        LOCK(cs);
+        for (const auto& [ivk, _] : mapIvkToAddresses) ivks.insert(ivk);
+        for (const auto& [ivk, fvk] : mapIvkToFvk) {
+            ivks.insert(ivk);
+            ovks.insert(fvk.ovk);
+        }
+        internalIvks = InternalIvks();
+    }
+    if (ivks.empty()) return result;
+
+    auto rustNetwork = MakeNoteDecryptionNetwork(networkIDStr, saplingHeight);
+    const uint32_t height = blockHeight >= 0 ? static_cast<uint32_t>(blockHeight) : 0u;
+
+    for (int outIdx = 0; outIdx < static_cast<int>(payload.vOutputDescriptions.size()); ++outIdx) {
+        const SaplingOutputDescription& od = payload.vOutputDescriptions[outIdx];
+        ::wallet::SaplingShieldedOutput ffi_output;
+        ffi_output.cv             = od.cv;
+        ffi_output.cmu            = od.cmu;
+        ffi_output.ephemeral_key  = od.ephemeralKey;
+        ffi_output.enc_ciphertext = od.encCiphertext;
+        ffi_output.out_ciphertext = od.outCiphertext;
+
+        std::optional<rust::Box<::wallet::DecryptedSaplingOutput>> decrypted;
+        ViewedOutput view;
+        view.index = outIdx;
+        for (const auto& ivk : ivks) {
+            try {
+                decrypted = ::wallet::try_sapling_note_decryption(*rustNetwork, height, ivk.key, ffi_output);
+                view.change = internalIvks.count(ivk) > 0;
+                break;
+            } catch (const std::exception&) {
+                // Not for this IVK, try the next one.
+            }
+        }
+        if (!decrypted) {
+            for (const auto& ovk : ovks) {
+                try {
+                    decrypted = ::wallet::try_sapling_output_recovery(*rustNetwork, height, ovk, ffi_output);
+                    view.outgoing = true;
+                    break;
+                } catch (const std::exception&) {
+                    // Not sent with this OVK, try the next one.
+                }
+            }
+        }
+        if (!decrypted) continue;
+
+        view.value = static_cast<CAmount>((*decrypted)->note_value());
+        if (!MoneyRange(view.value)) continue;
+        auto d    = (*decrypted)->recipient_d();
+        auto pk_d = (*decrypted)->recipient_pk_d();
+        std::copy(d.begin(), d.end(), view.recipient.d.begin());
+        std::copy(pk_d.begin(), pk_d.end(), view.recipient.pk_d.begin());
+        view.memo = (*decrypted)->memo();
+        result.push_back(std::move(view));
+    }
+    return result;
+}
+
+std::vector<std::pair<int, SaplingNoteData>> SaplingKeyManager::NotesSpentBy(const SaplingTxPayload& payload) const
+{
+    std::vector<std::pair<int, SaplingNoteData>> result;
+    LOCK(cs);
+    for (int spendIdx = 0; spendIdx < static_cast<int>(payload.vSpendDescriptions.size()); ++spendIdx) {
+        uint256 nf;
+        const auto& nullifier = payload.vSpendDescriptions[spendIdx].nullifier;
+        std::copy(nullifier.begin(), nullifier.end(), nf.begin());
+        if (nf.IsNull()) continue;
+        for (const auto& [key, nd] : mapSaplingNotes) {
+            if (nd.nullifier == nf) {
+                result.emplace_back(spendIdx, nd);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
 } // namespace wallet

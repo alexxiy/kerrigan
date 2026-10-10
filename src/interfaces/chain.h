@@ -209,6 +209,11 @@ public:
     //! Check if transaction is in mempool.
     virtual bool isInMempool(const uint256& txid) = 0;
 
+    //! Find a transaction in the mempool, the transaction index, or the active
+    //! chain block at block_height (not searched when block_height is negative).
+    //! Sets block_hash when the transaction is in a block. Returns null if not found.
+    virtual CTransactionRef findTransaction(const uint256& txid, int block_height, uint256& block_hash) = 0;
+
     //! Check if transaction has descendants in mempool.
     virtual bool hasDescendantsInMempool(const uint256& txid) = 0;
 

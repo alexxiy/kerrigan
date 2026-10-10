@@ -1525,4 +1525,212 @@ RPCHelpMan z_rebuildsaplingwitnesses()
     };
 }
 
+/** True if @p s is well-formed UTF-8 (no overlong forms, surrogates or code points above U+10FFFF). */
+static bool IsValidUtf8(const std::string& s)
+{
+    size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c = s[i];
+        int len;
+        uint32_t cp;
+        if (c < 0x80) { ++i; continue; }
+        else if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+        else return false;
+        if (i + len > s.size()) return false;
+        for (int k = 1; k < len; ++k) {
+            const unsigned char cc = s[i + k];
+            if ((cc & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if ((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000)) return false;
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        i += len;
+    }
+    return true;
+}
+
+/** The text of a memo (ZIP 302: first byte at most 0xF4) without its zero padding, or nullopt if it is empty or not text. */
+static std::optional<std::string> MemoText(const std::array<uint8_t, 512>& memo)
+{
+    if (memo[0] > 0xF4) return std::nullopt;
+    size_t len = memo.size();
+    while (len > 0 && memo[len - 1] == 0) --len;
+    if (len == 0) return std::nullopt;
+    std::string text(memo.begin(), memo.begin() + len);
+    if (!IsValidUtf8(text)) return std::nullopt;
+    return text;
+}
+
+/** The fee of a Sapling transaction, or nullopt if one of its transparent inputs cannot be found. */
+static std::optional<CAmount> SaplingTxFee(const CWallet& wallet, const CTransaction& tx, const SaplingTxPayload& payload)
+{
+    CAmount valueIn = 0;
+    for (const CTxIn& txin : tx.vin) {
+        CTransactionRef prev;
+        {
+            LOCK(wallet.cs_wallet);
+            if (const CWalletTx* wtx = wallet.GetWalletTx(txin.prevout.hash)) prev = wtx->tx;
+        }
+        if (!prev) {
+            uint256 unused;
+            prev = wallet.chain().findTransaction(txin.prevout.hash, /*block_height=*/-1, unused);
+        }
+        if (!prev || txin.prevout.n >= prev->vout.size()) return std::nullopt;
+        valueIn += prev->vout[txin.prevout.n].nValue;
+    }
+    return valueIn - tx.GetValueOut() + payload.valueBalance;
+}
+
+RPCHelpMan z_viewtransaction()
+{
+    return RPCHelpMan{"z_viewtransaction",
+        "\nShow the Sapling spends and outputs of a transaction that this wallet can read.\n"
+        "Outputs are decrypted with the wallet's incoming viewing keys (payments received,\n"
+        "whether or not the notes have since been spent) and its outgoing viewing keys\n"
+        "(payments sent by wallets that keep one). Kerrigan Core does not keep an outgoing\n"
+        "viewing key on outputs it pays to others, so those outputs are not shown.\n"
+        "Needs no spending key: works on a locked wallet and on a viewing-key-only wallet.\n"
+        "A transaction outside the wallet and the mempool is found through -txindex (on by\n"
+        "default), or through the block of a note it paid to this wallet.\n",
+        {
+            {"txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The transaction id"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "txid", "The transaction id"},
+                {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The fee, when every transparent input can be found"},
+                {RPCResult::Type::NUM, "confirmations", "The number of confirmations (0 when not in the active chain)"},
+                {RPCResult::Type::STR_HEX, "blockhash", /*optional=*/true, "The block that contains the transaction"},
+                {RPCResult::Type::NUM, "blockheight", /*optional=*/true, "The height of that block"},
+                {RPCResult::Type::ARR, "spends", "This wallet's notes spent by the transaction",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::NUM, "spend", "The index of the spend in the transaction"},
+                                {RPCResult::Type::STR_HEX, "txidPrev", "The transaction that created the note"},
+                                {RPCResult::Type::NUM, "outputPrev", "The index of the note in that transaction"},
+                                {RPCResult::Type::STR, "address", "The address the note was paid to"},
+                                {RPCResult::Type::STR_AMOUNT, "value", "The value of the note"},
+                                {RPCResult::Type::NUM, "valueSat", "The value of the note in satoshis"},
+                            }},
+                    }},
+                {RPCResult::Type::ARR, "outputs", "The outputs this wallet can decrypt; others are left out",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::NUM, "output", "The index of the output in the transaction"},
+                                {RPCResult::Type::BOOL, "outgoing", "True if recovered with an outgoing viewing key (sent by this wallet, not received)"},
+                                {RPCResult::Type::BOOL, "change", "True if paid to one of this wallet's change addresses"},
+                                {RPCResult::Type::STR, "address", "The address the output pays"},
+                                {RPCResult::Type::STR_AMOUNT, "value", "The value of the output"},
+                                {RPCResult::Type::NUM, "valueSat", "The value of the output in satoshis"},
+                                {RPCResult::Type::STR_HEX, "memo", "The 512-byte memo field"},
+                                {RPCResult::Type::STR, "memoStr", /*optional=*/true, "The memo as text without its zero padding, when it is non-empty UTF-8 text (ZIP 302)"},
+                            }},
+                    }},
+            }},
+        RPCExamples{
+            HelpExampleCli("z_viewtransaction", "\"txid\"")
+    + HelpExampleRpc("z_viewtransaction", "\"txid\"")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            const std::shared_ptr<const CWallet> pwallet = GetWalletForJSONRPCRequest(request);
+            if (!pwallet) return UniValue::VNULL;
+
+            const uint256 txid = ParseHashV(request.params[0], "txid");
+            const auto& km = pwallet->GetSaplingKeyManager();
+
+            // The wallet's own copy first, then the mempool, -txindex, or the
+            // block of a note this transaction paid to the wallet.
+            CTransactionRef tx;
+            uint256 blockHash;
+            int tipHeight;
+            {
+                LOCK(pwallet->cs_wallet);
+                tipHeight = pwallet->GetLastBlockHeight();
+                if (const CWalletTx* wtx = pwallet->GetWalletTx(txid)) {
+                    tx = wtx->tx;
+                    if (const auto* conf = wtx->state<TxStateConfirmed>()) blockHash = conf->confirmed_block_hash;
+                }
+            }
+            if (!tx) {
+                int noteHeight = -1;
+                for (const auto& [key, nd] : km.GetAllNotes()) {
+                    if (nd.txid == txid && nd.blockHeight >= 0) {
+                        noteHeight = nd.blockHeight;
+                        break;
+                    }
+                }
+                tx = pwallet->chain().findTransaction(txid, noteHeight, blockHash);
+            }
+            if (!tx) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                    "No such transaction in the wallet, the mempool or the transaction index");
+            }
+
+            std::optional<SaplingTxPayload> payload;
+            if (tx->nType == TRANSACTION_SAPLING) payload = GetTxPayload<SaplingTxPayload>(*tx, /*assert_type=*/false);
+            if (!payload) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The transaction has no Sapling spends or outputs this wallet can read");
+            }
+
+            int blockHeight = -1;
+            bool inActiveChain = false;
+            if (!blockHash.IsNull()) {
+                pwallet->chain().findBlock(blockHash, interfaces::FoundBlock().height(blockHeight).inActiveChain(inActiveChain));
+            }
+            if (!inActiveChain) blockHeight = -1;
+
+            const auto outputs = km.ViewOutputs(*payload, blockHeight >= 0 ? blockHeight : tipHeight + 1,
+                                                Params().NetworkIDString(), Params().GetConsensus().SaplingHeight);
+            const auto spends = km.NotesSpentBy(*payload);
+            if (outputs.empty() && spends.empty()) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "The transaction has no Sapling spends or outputs this wallet can read");
+            }
+
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("txid", txid.GetHex());
+            if (const auto fee = SaplingTxFee(*pwallet, *tx, *payload)) result.pushKV("fee", ValueFromAmount(*fee));
+            result.pushKV("confirmations", blockHeight >= 0 ? tipHeight - blockHeight + 1 : 0);
+            if (blockHeight >= 0) {
+                result.pushKV("blockhash", blockHash.GetHex());
+                result.pushKV("blockheight", blockHeight);
+            }
+
+            UniValue jsSpends(UniValue::VARR);
+            for (const auto& [index, note] : spends) {
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("spend", index);
+                entry.pushKV("txidPrev", note.txid.GetHex());
+                entry.pushKV("outputPrev", note.outputIndex);
+                entry.pushKV("address", EncodeSaplingAddress(note.recipient));
+                entry.pushKV("value", ValueFromAmount(note.value));
+                entry.pushKV("valueSat", note.value);
+                jsSpends.push_back(entry);
+            }
+            result.pushKV("spends", jsSpends);
+
+            UniValue jsOutputs(UniValue::VARR);
+            for (const auto& out : outputs) {
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("output", out.index);
+                entry.pushKV("outgoing", out.outgoing);
+                entry.pushKV("change", out.change);
+                entry.pushKV("address", EncodeSaplingAddress(out.recipient));
+                entry.pushKV("value", ValueFromAmount(out.value));
+                entry.pushKV("valueSat", out.value);
+                entry.pushKV("memo", HexStr(out.memo));
+                if (const auto text = MemoText(out.memo)) entry.pushKV("memoStr", *text);
+                jsOutputs.push_back(entry);
+            }
+            result.pushKV("outputs", jsOutputs);
+            return result;
+        },
+    };
+}
+
 } // namespace wallet
