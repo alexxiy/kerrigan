@@ -1868,8 +1868,10 @@ class KerriganTestFramework(BitcoinTestFramework):
             self.create_simple_node(self.extra_args)
         if self._requires_wallet:
             self.import_deterministic_coinbase_privkeys()
+        # BroodNodes beyond the regular masternode count are added on top of
+        # them, so never subtract below zero (that under-funded the collateral).
         required_balance = EVONODE_COLLATERAL * self.evo_count
-        required_balance += MASTERNODE_COLLATERAL * (self.mn_count - self.evo_count) + 100
+        required_balance += MASTERNODE_COLLATERAL * max(self.mn_count - self.evo_count, 0) + 100
         self.log.info("Generating %d coins" % required_balance)
         # One consolidation chunk of headroom so collateral + fees never run tight.
         while self.nodes[0].getbalance() < required_balance + self.CONSOLIDATE_CHUNK:
