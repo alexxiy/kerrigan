@@ -388,6 +388,12 @@ public:
                                           const std::string& networkIDStr,
                                           int saplingHeight) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    /** True if transaction @p txid paid the wallet a note or spent one of its notes. */
+    bool IsInvolvedIn(const uint256& txid) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** The notes transaction @p txid paid to the wallet's external addresses (change is left out). */
+    std::vector<SaplingNoteData> GetReceivedNotes(const uint256& txid) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     /** The wallet's notes spent by @p payload, each with the index of its SpendDescription. */
     std::vector<std::pair<int, SaplingNoteData>> NotesSpentBy(const SaplingTxPayload& payload) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 

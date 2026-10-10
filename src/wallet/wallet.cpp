@@ -1421,6 +1421,13 @@ void CWallet::transactionAddedToMempool(const CTransactionRef& tx, int64_t nAcce
         if (payload) {
             m_sapling_key_manager.ScanSaplingOutputs(*tx, *payload, -1, Params().NetworkIDString(), Params().GetConsensus().SaplingHeight, &batch);
             m_sapling_key_manager.ScanSaplingSpends(*tx, *payload, &batch);
+            // A shielded receive has no transparent output of ours, so
+            // SyncTransaction above did not add it.
+            if (!mapWallet.count(tx->GetHash()) && m_sapling_key_manager.IsInvolvedIn(tx->GetHash())) {
+                if (CWalletTx* wtx = AddToWallet(tx, TxStateInMempool{}, /*update_wtx=*/nullptr, /*fFlushOnClose=*/false)) {
+                    RefreshMempoolStatus(*wtx, chain());
+                }
+            }
         }
     }
 }
@@ -1534,6 +1541,21 @@ void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& 
     // Detect shielded spends using computed nullifiers
     for (const auto& [ptx, payload] : saplingTxs) {
         m_sapling_key_manager.ScanSaplingSpends(*ptx, payload, &batch);
+    }
+}
+
+void CWallet::AddSaplingTransactions(const CBlock& block, int height, bool rescanning_old_block)
+{
+    AssertLockHeld(cs_wallet);
+    if (m_sapling_key_manager.IsEmpty()) return;
+
+    const uint256 block_hash = block.GetHash();
+    for (size_t index = 0; index < block.vtx.size(); ++index) {
+        const CTransactionRef& ptx = block.vtx[index];
+        if (ptx->nType != TRANSACTION_SAPLING || mapWallet.count(ptx->GetHash())) continue;
+        if (!m_sapling_key_manager.IsInvolvedIn(ptx->GetHash())) continue;
+        AddToWallet(ptx, TxStateConfirmed{block_hash, height, static_cast<int>(index)}, /*update_wtx=*/nullptr,
+                    /*fFlushOnClose=*/false, rescanning_old_block);
     }
 }
 
@@ -2134,6 +2156,7 @@ void CWallet::blockConnected(const CBlock& block, int height)
     }
 
     ProcessSaplingBlock(block, height, batch);
+    AddSaplingTransactions(block, height, /*rescanning_old_block=*/false);
 
     // reset cache to make sure no longer immature coins are included
     fAnonymizableTallyCached = false;
@@ -2662,6 +2685,7 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                 }
 
                 ProcessSaplingBlock(block, block_height, batch);
+                AddSaplingTransactions(block, block_height, /*rescanning_old_block=*/true);
 
                 // scan succeeded, record block as most recent successfully scanned
                 result.last_scanned_block = block_hash;

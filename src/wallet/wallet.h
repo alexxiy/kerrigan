@@ -654,6 +654,14 @@ public:
     void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /**
+     * Add to the wallet the transactions of @p block that paid it a note or
+     * spent one of its notes but have no transparent input or output of its
+     * own, so that gettransaction and listtransactions know them. Call after
+     * ProcessSaplingBlock, which records the notes.
+     */
+    void AddSaplingTransactions(const CBlock& block, int height, bool rescanning_old_block) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
      * Replay Sapling blocks using a pre-captured block-hash snapshot.
      *
      * The snapshot's element i corresponds to height (fromHeight + i), taken

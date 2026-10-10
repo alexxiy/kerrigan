@@ -5,9 +5,11 @@
 #include <core_io.h>
 #include <key_io.h>
 #include <rpc/util.h>
+#include <sapling/sapling_address.h>
 #include <util/vector.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/util.h>
+#include <wallet/sapling_keymanager.h>
 #include <wallet/wallet.h>
 
 using interfaces::FoundBlock;
@@ -412,6 +414,27 @@ static void ListTransactions(const CWallet& wallet, const CWalletTx& wtx, int nM
             ret.push_back(entry);
         }
     }
+    // Received at shielded addresses. Change to the wallet's internal
+    // addresses is left out, as transparent change is. Shielded addresses
+    // carry no labels.
+    if (!filter_label && ((wallet.GetTxDepthInMainChain(wtx) >= nMinDepth) || wallet.IsTxLockedByInstantSend(wtx))) {
+        const auto& km = wallet.GetSaplingKeyManager();
+        for (const SaplingNoteData& note : km.GetReceivedNotes(wtx.GetHash())) {
+            const bool watchonly = !km.CanSpend(note.recipient);
+            if (watchonly && !(filter_ismine & ISMINE_WATCH_ONLY)) continue;
+            UniValue entry(UniValue::VOBJ);
+            if (watchonly) entry.pushKV("involvesWatchonly", true);
+            entry.pushKV("address", EncodeSaplingAddress(note.recipient));
+            entry.pushKV("category", "receive");
+            entry.pushKV("amount", ValueFromAmount(note.value));
+            entry.pushKV("outindex", note.outputIndex);
+            entry.pushKV("shielded", true);
+            entry.pushKV("abandoned", wtx.isAbandoned());
+            if (fLong)
+                WalletTxToJSON(wallet, wtx, entry);
+            ret.push_back(entry);
+        }
+    }
 }
 
 static std::vector<RPCResult> TransactionDescriptionString()
@@ -468,7 +491,9 @@ RPCHelpMan listtransactions()
                             {RPCResult::Type::STR_AMOUNT, "amount", "The amount in " + CURRENCY_UNIT + ". This is negative for the 'send' category, and is positive\n"
                                 "for all other categories"},
                             {RPCResult::Type::STR, "label", /*optional=*/true, "A comment for the address/transaction, if any"},
-                            {RPCResult::Type::NUM, "vout", "the vout value"},
+                            {RPCResult::Type::NUM, "vout", /*optional=*/true, "the vout value (absent for shielded entries)"},
+                            {RPCResult::Type::NUM, "outindex", /*optional=*/true, "the index of the Sapling output (shielded entries only)"},
+                            {RPCResult::Type::BOOL, "shielded", /*optional=*/true, "true for a payment received at a shielded address"},
                             {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the\n"
                                  "'send' category of transactions."},
                         },
@@ -580,7 +605,9 @@ RPCHelpMan listsinceblock()
                                     "\"platform-transfer\"     Platform Transfer transactions received.\n"},
                                 {RPCResult::Type::STR_AMOUNT, "amount", "The amount in " + CURRENCY_UNIT + ". This is negative for the 'send' category, and is positive\n"
                                     "for all other categories"},
-                                {RPCResult::Type::NUM, "vout", "the vout value"},
+                                {RPCResult::Type::NUM, "vout", /*optional=*/true, "the vout value (absent for shielded entries)"},
+                                {RPCResult::Type::NUM, "outindex", /*optional=*/true, "the index of the Sapling output (shielded entries only)"},
+                                {RPCResult::Type::BOOL, "shielded", /*optional=*/true, "true for a payment received at a shielded address"},
                                 {RPCResult::Type::NUM, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the 'send' category of transactions."},
                             },
                             TransactionDescriptionString()),
@@ -721,7 +748,9 @@ RPCHelpMan gettransaction()
                                     "\"platform-transfer\"     Platform Transfer transactions received.\n"},
                                 {RPCResult::Type::STR_AMOUNT, "amount", "The amount in " + CURRENCY_UNIT},
                                 {RPCResult::Type::STR, "label", /*optional=*/true, "A comment for the address/transaction, if any"},
-                                {RPCResult::Type::NUM, "vout", "the vout value"},
+                                {RPCResult::Type::NUM, "vout", /*optional=*/true, "the vout value (absent for shielded entries)"},
+                                {RPCResult::Type::NUM, "outindex", /*optional=*/true, "the index of the Sapling output (shielded entries only)"},
+                                {RPCResult::Type::BOOL, "shielded", /*optional=*/true, "true for a payment received at a shielded address"},
                                 {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The amount of the fee in " + CURRENCY_UNIT + ". This is negative and only available for the \n"
                                      "'send' category of transactions."},
                                 {RPCResult::Type::BOOL, "abandoned", "'true' if the transaction has been abandoned (inputs are respendable)."},

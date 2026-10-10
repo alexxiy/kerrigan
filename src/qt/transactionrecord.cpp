@@ -5,6 +5,8 @@
 
 #include <qt/transactionrecord.h>
 
+#include <algorithm>
+
 #include <chain.h>
 #include <interfaces/wallet.h>
 #include <interfaces/node.h>
@@ -47,6 +49,13 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(interfaces::Nod
             isFromMe = true;
             break;
         }
+    }
+
+    // A shielded payment with no transparent input or output of ours is in the
+    // wallet for gettransaction and listtransactions; the Shielded tab shows it.
+    const bool anyOutputMine = std::any_of(wtx.txout_is_mine.begin(), wtx.txout_is_mine.end(), [](isminetype mine) { return mine != wallet::ISMINE_NO; });
+    if (!isFromMe && !anyOutputMine && !wtx.is_coinbase && !wtx.is_platform_transfer && wtx.tx->nType == TRANSACTION_SAPLING) {
+        return parts;
     }
 
     if (nNet > 0 || wtx.is_coinbase || wtx.is_platform_transfer)

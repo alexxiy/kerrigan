@@ -1627,4 +1627,25 @@ std::vector<std::pair<int, SaplingNoteData>> SaplingKeyManager::NotesSpentBy(con
     return result;
 }
 
+bool SaplingKeyManager::IsInvolvedIn(const uint256& txid) const
+{
+    LOCK(cs);
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        if (nd.txid == txid || nd.spendingTxid == txid) return true;
+    }
+    return false;
+}
+
+std::vector<SaplingNoteData> SaplingKeyManager::GetReceivedNotes(const uint256& txid) const
+{
+    std::vector<SaplingNoteData> result;
+    LOCK(cs);
+    const auto internalIvks = InternalIvks();
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        if (nd.txid == txid && internalIvks.count(nd.ivk) == 0) result.push_back(nd);
+    }
+    std::sort(result.begin(), result.end(), [](const SaplingNoteData& a, const SaplingNoteData& b) { return a.outputIndex < b.outputIndex; });
+    return result;
+}
+
 } // namespace wallet
