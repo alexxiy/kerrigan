@@ -28,6 +28,7 @@ void RegisterTxoutProofRPCCommands(CRPCTable&);
 void RegisterMasternodeRPCCommands(CRPCTable &tableRPC);
 void RegisterGovernanceRPCCommands(CRPCTable &tableRPC);
 void RegisterEvoRPCCommands(CRPCTable &tableRPC);
+void RegisterCoordinatorRPCCommands(CRPCTable &tableRPC);
 void RegisterQuorumsRPCCommands(CRPCTable &tableRPC);
 void RegisterHMPRPCCommands(CRPCTable &tableRPC);
 void RegisterRecoveryRPCCommands(CRPCTable &tableRPC);
@@ -57,6 +58,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterMasternodeRPCCommands(t);
     RegisterGovernanceRPCCommands(t);
     RegisterEvoRPCCommands(t);
+    RegisterCoordinatorRPCCommands(t);
     RegisterQuorumsRPCCommands(t);
     RegisterHMPRPCCommands(t);
     RegisterRecoveryRPCCommands(t);

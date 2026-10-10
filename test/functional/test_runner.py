@@ -101,6 +101,8 @@ BASE_SCRIPTS = [
     'feature_sapling_reorg.py',
     'feature_invalidateblock.py',
     'feature_sapling.py',
+    'feature_coordinator_supervisor.py',
+    'feature_coordinator_broodnode.py',
     'feature_sapling_fees.py',
     'feature_sapling_relay.py',
     'feature_sapling_activation.py',

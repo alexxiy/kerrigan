@@ -45,6 +45,7 @@
 #include <node/caches.h>
 #include <node/chainstate.h>
 #include <node/context.h>
+#include <node/coordinator.h>
 #include <node/interface_ui.h>
 #include <node/sync_manager.h>
 #include <node/txreconciliation.h>
@@ -432,6 +433,9 @@ void PrepareShutdown(NodeContext& node)
     /// module was initialized.
     util::ThreadRename("shutoff");
     if (node.mempool) node.mempool->AddTransactionsUpdated(1);
+
+    // Stop the coordinator while the RPC it reads is still up.
+    if (node.coordinator) node.coordinator->Stop();
 
     StopHTTPRPC();
     StopREST();
@@ -994,6 +998,9 @@ void SetupServerArgs(ArgsManager& argsman)
 
     argsman.AddArg("-llmq-data-recovery=<n>", strprintf("Enable automated quorum data recovery (default: %u)", llmq::DEFAULT_ENABLE_QUORUM_DATA_RECOVERY), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-llmq-qvvec-sync=<quorum_name>:<mode>", strprintf("Defines from which LLMQ type the masternode should sync quorum verification vectors. Can be used multiple times with different LLMQ types. <mode>: %d (sync always from all quorums of the type defined by <quorum_name>), %d (sync from all quorums of the type defined by <quorum_name> if a member of any of the quorums)", (int32_t)llmq::QvvecSyncMode::Always, (int32_t)llmq::QvvecSyncMode::OnlyIfTypeMember), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
+    argsman.AddArg("-coordinator=<auto|1|0>", "Run the AI swarm coordinator (kerrigan-coordinator) next to this node. Serving one is part of the BroodNode role. auto: while this node is an enabled BroodNode; 1: on any node; 0: never (default: auto)", ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
+    argsman.AddArg("-coordinatorpath=<file>", "The kerrigan-coordinator executable (default: next to kerrigand, else found on PATH)", ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
+    argsman.AddArg("-coordinatorbind=<addr:port>", "Address the coordinator listens on (default: all interfaces at the platform HTTPS port this BroodNode registered, 7122 otherwise)", ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-masternodeblsprivkey=<hex>", "Set the masternode BLS private key and enable the client to act as a masternode", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::MASTERNODE);
     argsman.AddArg("-masternodeselfcheck=<0|1>", strprintf("Refuse to run as a masternode when we cannot connect to our own external address. Most routers cannot do NAT hairpinning, so this check fails for reasons that do not affect reachability from the internet; 0 reports it as a warning instead (default: %u)", DEFAULT_MASTERNODE_SELF_CHECK), ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
     argsman.AddArg("-deprecated-platform-user=<user>", "Set the username for the \"platform user\", a restricted user intended to be used by Kerrigan Platform, to the specified username.", ArgsManager::ALLOW_ANY, OptionsCategory::MASTERNODE);
@@ -1384,6 +1391,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
 
     if (!errors.empty()) {
         return InitError(errors);
+    }
+
+    if (!node::ParseCoordinatorMode(args.GetArg("-coordinator", "auto"))) {
+        return InitError(strprintf(_("Invalid -coordinator value '%s'. Use auto, 1 or 0."), args.GetArg("-coordinator", "")));
     }
 
     // Warn if unrecognized section name are present in the config file.
@@ -3538,6 +3549,10 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             std::clamp<int64_t>(args.GetIntArg("-recoverytickinterval", 30), 1, 3600)};
         node.scheduler->scheduleEvery([] { recovery::g_recovery->SchedulerTick(); }, recovery_tick);
     }
+
+    // Nydus: the coordinator a BroodNode serves.
+    node.coordinator = std::make_unique<node::CoordinatorSupervisor>(node, args);
+    node.coordinator->Schedule(*node.scheduler);
 
     if (node.active_ctx) {
         node.active_ctx->Start(*node.connman, *node.peerman, *node.scheduler);

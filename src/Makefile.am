@@ -441,6 +441,7 @@ BITCOIN_CORE_H = \
   node/blockstorage.h \
   node/caches.h \
   node/chainstate.h \
+  node/coordinator.h \
   node/coin.h \
   node/connection_types.h \
   node/context.h \
@@ -729,6 +730,7 @@ libbitcoin_node_a_SOURCES = \
   node/blockstorage.cpp \
   node/caches.cpp \
   node/chainstate.cpp \
+  node/coordinator.cpp \
   node/coin.cpp \
   node/connection_types.cpp \
   node/context.cpp \
@@ -750,6 +752,7 @@ libbitcoin_node_a_SOURCES = \
   recovery/recovery.cpp \
   rest.cpp \
   rpc/blockchain.cpp \
+  rpc/coordinator.cpp \
   rpc/evo.cpp \
   rpc/fees.cpp \
   rpc/index_util.cpp \

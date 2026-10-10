@@ -8,6 +8,7 @@
 #include <banman.h>
 #include <interfaces/chain.h>
 #include <net.h>
+#include <node/coordinator.h>
 #include <netfulfilledman.h>
 #include <net_processing.h>
 #include <netgroup.h>

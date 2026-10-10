@@ -49,6 +49,8 @@ struct ObserverContext;
 } // namespace llmq
 
 namespace node {
+class CoordinatorSupervisor;
+
 //! NodeContext struct containing references to chain state and connection
 //! state.
 //!
@@ -92,6 +94,8 @@ struct NodeContext {
     std::unique_ptr<chainlock::ChainlockHandler> clhandler;
     //! Kerrigan contexts
     std::unique_ptr<ActiveContext> active_ctx;
+    //! Runs the AI swarm coordinator on a BroodNode (Nydus).
+    std::unique_ptr<CoordinatorSupervisor> coordinator;
     std::unique_ptr<LLMQContext> llmq_ctx;
     std::unique_ptr<llmq::ObserverContext> observer_ctx;
 
