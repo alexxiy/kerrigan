@@ -88,6 +88,7 @@ void SendCoinsEntry::on_payTo_textChanged(const QString &address)
         updateLabel(address);
         updateMemoVisibility(address);
     }
+    Q_EMIT payToChanged();
 }
 
 void SendCoinsEntry::setModel(WalletModel *_model)

@@ -1436,6 +1436,51 @@ std::vector<std::pair<uint256, SaplingNoteData>> SaplingKeyManager::GetUnspentNo
     return result;
 }
 
+std::vector<std::pair<uint256, SaplingNoteData>> SaplingKeyManager::GetUnspentNotesWithKeys() const
+{
+    LOCK(cs);
+    std::vector<std::pair<uint256, SaplingNoteData>> result;
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && !m_reservedNotes.count(key)) {
+            result.emplace_back(key, nd);
+        }
+    }
+    return result;
+}
+
+std::set<sapling::SaplingIncomingViewingKey> SaplingKeyManager::GetInternalIvks() const
+{
+    std::vector<std::pair<sapling::SaplingFullViewingKey, std::array<uint8_t, 32>>> keys;
+    std::set<sapling::SaplingIncomingViewingKey> tracked;
+    {
+        LOCK(cs);
+        for (const auto& [ivk, fvk] : mapIvkToFvk) {
+            tracked.insert(ivk);
+            auto dkIt = mapIvkToDk.find(ivk);
+            if (dkIt != mapIvkToDk.end()) keys.emplace_back(fvk, dkIt->second);
+        }
+    }
+
+    // An IVK is internal if it is the ZIP 316 internal derivation of another
+    // tracked key. The derivation only needs the FVK and DK.
+    std::set<sapling::SaplingIncomingViewingKey> result;
+    for (const auto& [fvk, dk] : keys) {
+        std::array<uint8_t, 96> fvk_bytes;
+        std::copy(fvk.ak.begin(), fvk.ak.end(), fvk_bytes.begin());
+        std::copy(fvk.nk.begin(), fvk.nk.end(), fvk_bytes.begin() + 32);
+        std::copy(fvk.ovk.begin(), fvk.ovk.end(), fvk_bytes.begin() + 64);
+        try {
+            auto derived = sapling::zip32::derive_internal_fvk(fvk_bytes, dk);
+            sapling::SaplingIncomingViewingKey internalIvk;
+            internalIvk.key = sapling::zip32::fvk_to_ivk(derived.fvk);
+            if (tracked.count(internalIvk)) result.insert(internalIvk);
+        } catch (const std::exception& e) {
+            LogPrintf("SaplingKeyManager::GetInternalIvks: derivation failed: %s\n", e.what());
+        }
+    }
+    return result;
+}
+
 void SaplingKeyManager::ZapNotesByTxid(const std::set<uint256>& txids, WalletBatch* batch)
 {
     LOCK(cs);

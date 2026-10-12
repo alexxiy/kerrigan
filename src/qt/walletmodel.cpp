@@ -456,22 +456,34 @@ QString WalletModel::getNewSaplingAddress()
     }
 }
 
-QString WalletModel::saplingZSendMany(const QString& from,
-                                       const QList<SendCoinsRecipient>& recipients,
-                                       int minconf)
+static std::vector<wallet::SaplingSendRecipient> ToSaplingRecipients(const QList<SendCoinsRecipient>& recipients)
 {
-    std::vector<interfaces::Wallet::SaplingRecipient> rcpts;
-    rcpts.reserve(recipients.size());
+    std::vector<wallet::SaplingSendRecipient> result;
+    result.reserve(recipients.size());
     for (const auto& r : recipients) {
-        interfaces::Wallet::SaplingRecipient rcpt;
+        wallet::SaplingSendRecipient rcpt;
         rcpt.address = r.address.toStdString();
         rcpt.amount = r.amount;
         const QByteArray memo = r.memo.toUtf8();
         rcpt.memo.assign(memo.begin(), memo.end());
-        rcpts.push_back(std::move(rcpt));
+        rcpt.subtract_fee = r.fSubtractFeeFromAmount;
+        result.push_back(std::move(rcpt));
     }
-    return QString::fromStdString(
-        m_wallet->saplingZSendMany(from.toStdString(), rcpts, minconf));
+    return result;
+}
+
+wallet::SaplingSendPlan WalletModel::planSaplingSend(const wallet::SaplingSendSource& source,
+                                                     const QList<SendCoinsRecipient>& recipients,
+                                                     int minconf)
+{
+    return m_wallet->planSaplingSend(source, ToSaplingRecipients(recipients), minconf);
+}
+
+QString WalletModel::sendSapling(const wallet::SaplingSendSource& source,
+                                 const QList<SendCoinsRecipient>& recipients,
+                                 int minconf)
+{
+    return QString::fromStdString(m_wallet->sendSapling(source, ToSaplingRecipients(recipients), minconf));
 }
 
 OptionsModel* WalletModel::getOptionsModel() const

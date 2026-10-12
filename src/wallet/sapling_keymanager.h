@@ -394,6 +394,18 @@ public:
     std::vector<std::pair<uint256, SaplingNoteData>> GetUnspentNotesWithKeys(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * Unspent notes with their cmu keys across all addresses, for reservation
+     * tracking (same filter as GetUnspentNotes()).
+     */
+    std::vector<std::pair<uint256, SaplingNoteData>> GetUnspentNotesWithKeys() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * IVKs of the internal (ZIP 316 change) keys of the tracked spending keys.
+     * Derived from the viewing keys, so it also works while the wallet is locked.
+     */
+    std::set<sapling::SaplingIncomingViewingKey> GetInternalIvks() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Remove notes created by zapped transactions and clear spend state
      * for notes whose spending transaction was zapped.
      *
