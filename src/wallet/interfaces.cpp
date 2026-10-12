@@ -571,6 +571,27 @@ public:
         }
         return result;
     }
+    static ShieldedNoteInfo MakeShieldedNoteInfo(const uint256& cmu, const SaplingNoteData& nd)
+    {
+        ShieldedNoteInfo info;
+        info.cmu = cmu;
+        info.value = nd.value;
+        info.address = EncodeSaplingAddress(nd.recipient);
+        // Decode memo: extract printable ASCII prefix
+        std::string memo;
+        for (size_t i = 0; i < nd.memo.size(); ++i) {
+            uint8_t c = nd.memo[i];
+            if (c == 0) break;
+            if (c >= 32 && c < 127) memo += static_cast<char>(c);
+        }
+        info.memo = memo;
+        info.txid = nd.txid;
+        info.outputIndex = nd.outputIndex;
+        info.blockHeight = nd.blockHeight;
+        info.isSpent = nd.isSpent;
+        info.spendingTxid = nd.spendingTxid;
+        return info;
+    }
     std::vector<ShieldedNoteInfo> getShieldedNoteHistory() override
     {
         const auto& km = m_wallet->GetSaplingKeyManager();
@@ -578,24 +599,15 @@ public:
         std::vector<ShieldedNoteInfo> result;
         result.reserve(allNotes.size());
         for (const auto& [cmu, nd] : allNotes) {
-            ShieldedNoteInfo info;
-            info.cmu = cmu;
-            info.value = nd.value;
-            info.address = EncodeSaplingAddress(nd.recipient);
-            // Decode memo: extract printable ASCII prefix
-            std::string memo;
-            for (size_t i = 0; i < nd.memo.size(); ++i) {
-                uint8_t c = nd.memo[i];
-                if (c == 0) break;
-                if (c >= 32 && c < 127) memo += static_cast<char>(c);
-            }
-            info.memo = memo;
-            info.txid = nd.txid;
-            info.outputIndex = nd.outputIndex;
-            info.blockHeight = nd.blockHeight;
-            info.isSpent = nd.isSpent;
-            info.spendingTxid = nd.spendingTxid;
-            result.push_back(std::move(info));
+            result.push_back(MakeShieldedNoteInfo(cmu, nd));
+        }
+        return result;
+    }
+    std::vector<ShieldedNoteInfo> getShieldedNotesForTx(const uint256& txid) override
+    {
+        std::vector<ShieldedNoteInfo> result;
+        for (const auto& nd : m_wallet->GetSaplingKeyManager().GetNotesByTxid(txid)) {
+            result.push_back(MakeShieldedNoteInfo(uint256(), nd));
         }
         return result;
     }

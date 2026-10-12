@@ -8,12 +8,15 @@
 #include <chain.h>
 #include <interfaces/wallet.h>
 #include <interfaces/node.h>
+#include <evo/specialtx.h>
 #include <primitives/transaction.h>
+#include <sapling/sapling_tx_payload.h>
 
 #include <wallet/ismine.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 using wallet::ISMINE_NO;
 using wallet::ISMINE_SPENDABLE;
@@ -143,7 +146,50 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(interfaces::Nod
             if(fAllToMe > mine) fAllToMe = mine;
         }
 
-        if (fAllFromMe && fAllToMe)
+        // Transparent coins of this wallet moved into shielded outputs (t->z).
+        // The shielded recipients are not visible here (outputs to others
+        // cannot be decrypted by the sender), so one row covers them all.
+        std::optional<SaplingTxPayload> sapling_payload;
+        if (fAllFromMe && wtx.tx->nType == TRANSACTION_SAPLING) {
+            sapling_payload = GetTxPayload<SaplingTxPayload>(*wtx.tx, /*assert_type=*/false);
+        }
+        if (sapling_payload && sapling_payload->valueBalance < 0)
+        {
+            const CAmount nShielded = -sapling_payload->valueBalance;
+            const CAmount nTxFee = nDebit - wtx.tx->GetValueOut() - nShielded;
+
+            TransactionRecord sub(hash, nTime);
+            sub.type = TransactionRecord::SendToShielded;
+            sub.idx = wtx.tx->vout.size(); // after the transparent outputs
+            sub.shieldedValue = nShielded;
+            sub.debit = -(nShielded + std::max<CAmount>(nTxFee, 0));
+            sub.involvesWatchAddress = involvesWatchAddress;
+            parts.append(sub);
+
+            // Transparent recipients of the same transaction; outputs to this
+            // wallet are change
+            for (unsigned int nOut = 0; nOut < wtx.tx->vout.size(); nOut++)
+            {
+                const CTxOut& txout = wtx.tx->vout[nOut];
+                if (wtx.txout_is_mine[nOut]) continue;
+                TransactionRecord out(hash, nTime);
+                out.idx = nOut;
+                out.involvesWatchAddress = involvesWatchAddress;
+                if (!std::get_if<CNoDestination>(&wtx.txout_address[nOut])) {
+                    out.type = TransactionRecord::SendToAddress;
+                    out.strAddress = EncodeDestination(wtx.txout_address[nOut]);
+                    out.txDest = wtx.txout_address[nOut];
+                    out.updateLabel(wallet);
+                } else {
+                    out.type = TransactionRecord::SendToOther;
+                    out.strAddress = mapValue["to"];
+                    out.txDest = DecodeDestination(out.strAddress);
+                }
+                out.debit = -txout.nValue;
+                parts.append(out);
+            }
+        }
+        else if (fAllFromMe && fAllToMe)
         {
             // Payment to self -- the only real cost is the transaction fee.
             // For masternode collateral creation (10,000 KRGN to self) or

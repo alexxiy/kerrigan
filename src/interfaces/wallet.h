@@ -265,6 +265,9 @@ public:
     //! Get all shielded notes (spent + unspent) for the history view.
     virtual std::vector<ShieldedNoteInfo> getShieldedNoteHistory() = 0;
 
+    //! Wallet notes created by transaction @p txid (spent + unspent).
+    virtual std::vector<ShieldedNoteInfo> getShieldedNotesForTx(const uint256& txid) = 0;
+
     //! Sapling notes the wallet can spend, with at least @p minconf confirmations.
     virtual std::vector<wallet::SaplingSpendableNote> listSpendableSaplingNotes(int minconf) = 0;
 
