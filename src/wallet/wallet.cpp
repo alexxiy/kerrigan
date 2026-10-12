@@ -2805,6 +2805,10 @@ void CWallet::ResendWalletTransactions()
             // the last block. SubmitTxMemoryPoolAndRelay() will not rebroadcast
             // any confirmed or conflicting txs.
             if (wtx.nTimeReceived > m_best_block_time - 5 * 60) continue;
+            // A shielded payment this wallet only received is the sender's to
+            // rebroadcast; re-announcing it would link this node to it.
+            if (wtx.tx->nType == TRANSACTION_SAPLING && !IsFromMe(*wtx.tx) &&
+                !m_sapling_key_manager.IsSpendingTx(wtx.GetHash())) continue;
             bilingual_str unused_err_string;
             if (SubmitTxMemoryPoolAndRelay(wtx, unused_err_string, true)) ++submitted_tx_count;
         }

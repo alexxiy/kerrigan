@@ -144,6 +144,13 @@ void URITests::uriTests()
     uri.setUrl(QString("kerrigan:%1?memo=_w").arg(zaddrStr)); // 0xFF
     QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
 
+    // A NUL inside the text; trailing zero padding is fine
+    uri.setUrl(QString("kerrigan:%1?memo=YQBi").arg(zaddrStr)); // "a\0b"
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
+    uri.setUrl(QString("kerrigan:%1?memo=YWIAAA").arg(zaddrStr)); // "ab\0\0"
+    QVERIFY(GUIUtil::parseBitcoinURI(uri, &rv));
+    QVERIFY(rv.memo == QString("ab"));
+
     // formatBitcoinURI round trip
     SendCoinsRecipient zrcp;
     zrcp.address = zaddrStr;

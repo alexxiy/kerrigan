@@ -413,6 +413,11 @@ bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
             while (!memo.isEmpty() && memo.back() == '\0') {
                 memo.chop(1);
             }
+            // The Send page edits the memo as a line of text, which cannot
+            // hold a NUL: it would silently change the memo
+            if (memo.contains('\0')) {
+                return false;
+            }
             const QString text = QString::fromUtf8(memo);
             if (text.toUtf8() != memo) {
                 return false;
