@@ -47,9 +47,9 @@ constexpr std::chrono::seconds BACKOFF_MIN{10};
 constexpr std::chrono::seconds BACKOFF_MAX{600};
 /** A run this long counts as healthy and resets the backoff. */
 constexpr std::chrono::seconds HEALTHY_RUN{600};
-/** Time the coordinator gets to shut down cleanly before it is killed. */
-constexpr std::chrono::seconds STOP_GRACE{10};
-/** The coordinator log is rotated to coordinator.log.1 at start once it passes this size. */
+/** Time the coordinator gets to shut down cleanly before it is killed (it caps its own shutdown at 3 s). */
+constexpr std::chrono::seconds STOP_GRACE{5};
+/** The coordinator log is rotated to coordinator.log.1 once it passes this size, checked on every supervise pass. */
 constexpr uintmax_t LOG_ROTATE_BYTES{10 * 1024 * 1024};
 /** Port used when the node has no registered coordinator address (-coordinator=1 on a non-BroodNode). */
 constexpr uint16_t DEFAULT_COORDINATOR_PORT{7122};
@@ -74,7 +74,11 @@ std::optional<CService> RegisteredEndpoint(const CDeterministicMN& dmn, NetInfoP
     return CService(state.netInfo->GetPrimary(), port);
 }
 
-/** kerrigan-coordinator next to the running kerrigand, else the bare name (found on PATH). */
+/**
+ * kerrigan-coordinator next to the running kerrigand, or an empty path when
+ * that cannot be determined. Never a bare name: a PATH lookup could run
+ * whatever binary of that name comes first.
+ */
 fs::path DefaultBinary()
 {
 #ifdef __linux__
@@ -82,14 +86,10 @@ fs::path DefaultBinary()
     const ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (len > 0) {
         buf[len] = '\0';
-        const fs::path beside = fs::PathFromString(std::string(buf, len)).parent_path() / COORDINATOR_BINARY;
-        try {
-            if (fs::exists(beside)) return beside;
-        } catch (const fs::filesystem_error&) {
-        }
+        return fs::PathFromString(std::string(buf, len)).parent_path() / COORDINATOR_BINARY;
     }
 #endif
-    return fs::PathFromString(COORDINATOR_BINARY);
+    return {};
 }
 
 /** A ZMQ endpoint the coordinator can connect to: a wildcard bind becomes loopback. */
@@ -101,13 +101,19 @@ std::string ConnectableZmq(std::string endpoint)
     return endpoint;
 }
 
+/**
+ * Keep the coordinator log under LOG_ROTATE_BYTES: copy it to
+ * coordinator.log.1 and truncate it. Truncating, not renaming, works while the
+ * coordinator runs: it writes with O_APPEND, so it carries on at the new end.
+ */
 void RotateLog(const fs::path& log)
 {
     try {
         if (fs::exists(log) && fs::file_size(log) > LOG_ROTATE_BYTES) {
             fs::path old = log;
             old += ".1";
-            fs::rename(log, old);
+            fs::copy_file(log, old, fs::copy_options::overwrite_existing);
+            fs::resize_file(log, 0);
         }
     } catch (const fs::filesystem_error& e) {
         LogPrintf("Coordinator: could not rotate %s: %s\n", fs::PathToString(log), e.what());
@@ -201,6 +207,10 @@ std::optional<CoordinatorSupervisor::LaunchPlan> CoordinatorSupervisor::Plan(std
 
     LaunchPlan plan;
     plan.binary = m_args.IsArgSet("-coordinatorpath") ? m_args.GetPathArg("-coordinatorpath") : DefaultBinary();
+    if (plan.binary.empty() || !plan.binary.is_absolute()) {
+        reason = "set -coordinatorpath to the absolute path of kerrigan-coordinator";
+        return std::nullopt;
+    }
 
     const fs::path dir = m_args.GetDataDirNet() / "coordinator";
     plan.log_file = dir / "coordinator.log";
@@ -262,6 +272,8 @@ void CoordinatorSupervisor::StartLocked(const LaunchPlan& plan)
         m_child->proc = std::move(proc);
         m_started_at = std::chrono::steady_clock::now();
         m_public_url = plan.public_url;
+        m_running_args = plan.args;
+        m_log_file = plan.log_file;
         m_status = "running";
         LogPrintf("Coordinator: started %s (pid %d)%s, log %s\n", fs::PathToString(plan.binary), m_child->pid,
                   plan.public_url.empty() ? "" : " serving " + plan.public_url, log);
@@ -300,6 +312,7 @@ void CoordinatorSupervisor::StopLocked(const std::string& why)
 #endif
     m_child.reset();
     m_public_url.clear();
+    m_running_args.clear();
 }
 
 void CoordinatorSupervisor::Supervise()
@@ -339,9 +352,14 @@ void CoordinatorSupervisor::Supervise()
         return;
     }
     if (m_child) {
-        // The registered address changed (ProUpServTx): restart with the new one.
-        if (plan->public_url != m_public_url) StopLocked("registered address changed to " + plan->public_url);
-        else return;
+        // Anything it was started with changed (a ProUpServTx moving either
+        // registered port or address, ZMQ, bind): restart with the new plan.
+        if (plan->args != m_running_args) {
+            StopLocked("its settings changed" + (plan->public_url.empty() ? std::string{} : ", serving " + plan->public_url));
+        } else {
+            RotateLog(m_log_file);
+            return;
+        }
     }
     if (now < m_next_start) {
         m_status = strprintf("restarting in %ds", std::chrono::duration_cast<std::chrono::seconds>(m_next_start - now).count());

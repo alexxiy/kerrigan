@@ -26,8 +26,14 @@ env = {{k: v for k, v in os.environ.items() if k.startswith("KRGN_")}}
 with open(os.path.join(state, "start-%d.json" % pid), "w") as f:
     json.dump({{"pid": pid, "argv": sys.argv[1:], "env": env}}, f)
 mode_file = os.path.join(state, "mode")
-if os.path.exists(mode_file) and open(mode_file).read().strip() == "crash":
+mode = open(mode_file).read().strip() if os.path.exists(mode_file) else ""
+if mode == "crash":
     sys.exit(3)
+if mode == "noisy":
+    line = "x" * 1023 + "\\n"
+    for _ in range(11 * 1024):
+        sys.stdout.write(line)
+    sys.stdout.flush()
 def stop(*_):
     open(os.path.join(state, "stopped-%d" % pid), "w").close()
     sys.exit(0)
@@ -176,6 +182,26 @@ class CoordinatorSupervisorTest(BitcoinTestFramework):
         self.wait_until(lambda: (self.tick() or True) and node.getcoordinatorinfo()["restarts"] == 2)
         assert_equal(node.getcoordinatorinfo()["last_exit_code"], 3)
         assert_equal(node.getblockcount(), 1)
+
+        self.log.info("a relative -coordinatorpath is refused")
+        self.restart_node(0, ["-coordinator=1", "-coordinatorpath=fake-coordinator"])
+        self.wait_blockchain_synced()
+        self.tick()
+        assert_equal(node.getcoordinatorinfo()["status"], "set -coordinatorpath to the absolute path of kerrigan-coordinator")
+
+        self.log.info("the log is rotated while the coordinator runs")
+        self.set_mode("noisy")
+        self.restart_node(0, ["-coordinator=1", "-coordinatorpath=" + self.fake])
+        self.wait_blockchain_synced()
+        self.tick()
+        log = os.path.join(node.datadir, self.chain, "coordinator", "coordinator.log")
+        self.wait_until(lambda: os.path.exists(log) and os.path.getsize(log) > 10 * 1024 * 1024)
+        pid = node.getcoordinatorinfo()["pid"]
+        self.tick()
+        self.wait_until(lambda: os.path.exists(log + ".1") and os.path.getsize(log + ".1") > 10 * 1024 * 1024
+                        and os.path.getsize(log) < 1024 * 1024)
+        assert_equal(node.getcoordinatorinfo()["pid"], pid)  # same coordinator, still running
+        self.set_mode("")
 
         self.log.info("a missing executable is reported, and the node keeps running")
         self.restart_node(0, ["-coordinator=1", "-coordinatorpath=/nonexistent/kerrigan-coordinator"])

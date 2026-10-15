@@ -87,6 +87,8 @@ private:
     bool m_stopped GUARDED_BY(m_mutex){false};
     std::string m_status GUARDED_BY(m_mutex){"not checked yet"};
     std::string m_public_url GUARDED_BY(m_mutex);
+    std::vector<std::string> m_running_args GUARDED_BY(m_mutex);
+    fs::path m_log_file GUARDED_BY(m_mutex);
     int m_restarts GUARDED_BY(m_mutex){0};
     std::optional<int> m_last_exit GUARDED_BY(m_mutex);
     std::chrono::seconds m_backoff GUARDED_BY(m_mutex){0};
