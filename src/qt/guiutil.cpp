@@ -342,7 +342,7 @@ void AddButtonShortcut(QAbstractButton* button, const QKeySequence& shortcut)
     QObject::connect(new QShortcut(shortcut, button), &QShortcut::activated, [button]() { button->animateClick(); });
 }
 
-/** Decode a URI memo (ZIP 321: base64url, padding optional) that holds UTF-8 text of at most 512 bytes. */
+/** Decode a URI memo (ZIP 321: base64url, padding optional) that holds UTF-8 text of at most 512 bytes, without control characters or a byte-order mark. */
 static std::optional<QString> DecodeURIMemo(const QString& encoded)
 {
     const auto decoded = QByteArray::fromBase64Encoding(encoded.toLatin1(),
@@ -350,10 +350,17 @@ static std::optional<QString> DecodeURIMemo(const QString& encoded)
     if (!decoded || decoded.decoded.size() > 512) return std::nullopt;
     // Binary memos (first byte above 0xF4, ZIP 302) cannot be entered on the Send page.
     if (!decoded.decoded.isEmpty() && static_cast<uint8_t>(decoded.decoded[0]) > 0xF4) return std::nullopt;
-    QTextCodec::ConverterState state;
+    // IgnoreHeader keeps a leading byte-order mark, so the check below sees it
+    // instead of the decoder silently dropping it and sending different bytes.
+    QTextCodec::ConverterState state(QTextCodec::IgnoreHeader);
     const QString text = QTextCodec::codecForName("UTF-8")->toUnicode(decoded.decoded.constData(), decoded.decoded.size(), &state);
     // An incomplete sequence at the end is held in remainingChars, not counted as invalid.
     if (state.invalidChars > 0 || state.remainingChars > 0) return std::nullopt;
+    // No control characters (a newline would add fake lines to the send
+    // confirmation) and no byte-order mark.
+    for (const QChar c : text) {
+        if (c.category() == QChar::Other_Control || c == QChar(0xFEFF)) return std::nullopt;
+    }
     return text;
 }
 

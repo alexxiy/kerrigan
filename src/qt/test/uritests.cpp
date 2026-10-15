@@ -131,6 +131,11 @@ void URITests::uriTests()
     QVERIFY(!GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=b3J+ZXIgMTI", &rv));
     QVERIFY(!GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=9QE", &rv));
     QVERIFY(!GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=w6", &rv));
+    // Control characters (a newline would fake a line in the send confirmation) and a byte-order mark.
+    const auto b64 = [](const QByteArray& raw) { return QString::fromLatin1(raw.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)); };
+    QVERIFY(!GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=" + b64("order 12\nFrom: you"), &rv));
+    QVERIFY(!GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=" + b64("tab\there"), &rv));
+    QVERIFY(!GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=" + b64("\xEF\xBB\xBForder 12"), &rv));
     const QString max = QString::fromLatin1(QByteArray(512, 'a').toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     const QString over = QString::fromLatin1(QByteArray(513, 'a').toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
     QVERIFY(GUIUtil::parseBitcoinURI("kerrigan:" + zaddr + "?memo=" + max, &rv));
