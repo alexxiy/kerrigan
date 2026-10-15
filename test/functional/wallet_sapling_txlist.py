@@ -112,6 +112,22 @@ class SaplingTxListTest(BitcoinTestFramework):
         node1.reconsiderblock(block)
         assert_equal(node1.gettransaction(block_txid)["confirmations"], 2)
 
+        self.log.info("A shielded payment someone else sent is never resubmitted; our own spend is")
+        received_txid = node0.z_sendmany(self.t_addr, [{"address": z1, "amount": 1}], 1, FEE)
+        own_txid = node1.z_sendmany(z1, [{"address": node0.getnewaddress(), "amount": 1}], 1, FEE)
+        self.sync_mempools()
+        # Restart with an empty mempool and no peers: whatever is in it after
+        # startup was resubmitted by the wallet itself.
+        self.restart_node(1, extra_args=["-persistmempool=0"])
+        mempool = node1.getrawmempool()
+        assert own_txid in mempool
+        assert received_txid not in mempool
+        assert_equal(node1.gettransaction(received_txid)["confirmations"], 0)  # still a wallet transaction
+        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 2)
+        self.mine()
+        self.sync_all()
+
         self.log.info("A viewing-key-only wallet finds them on rescan, as watch-only")
         node2.z_importviewingkey(node1.z_exportviewingkey(z1), "yes", 0)
         tx = node2.gettransaction(txid, True)

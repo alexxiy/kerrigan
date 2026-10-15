@@ -42,6 +42,7 @@
 #include <wallet/bip39.h> // TODO(refactor): move dependency it to scriptpubkeyman.cpp
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
+#include <wallet/receive.h>
 #include <wallet/external_signer_scriptpubkeyman.h>
 #include <warnings.h>
 
@@ -2762,7 +2763,8 @@ void CWallet::ReacceptWalletTransactions()
 
         int nDepth = GetTxDepthInMainChain(wtx);
 
-        if (!wtx.IsCoinBase() && (nDepth == 0 && !IsTxLockedByInstantSend(wtx) && !wtx.isAbandoned())) {
+        // A shielded payment someone else sent us is not ours to resubmit (see CanTxBeResent).
+        if (!wtx.IsCoinBase() && (nDepth == 0 && !IsTxLockedByInstantSend(wtx) && !wtx.isAbandoned()) && !IsReceivedShieldedOnly(wtx)) {
             mapSorted.insert(std::make_pair(wtx.nOrderPos, &wtx));
         }
     }
@@ -2775,6 +2777,17 @@ void CWallet::ReacceptWalletTransactions()
     }
 }
 
+bool CWallet::IsReceivedShieldedOnly(const CWalletTx& wtx) const
+{
+    AssertLockHeld(cs_wallet);
+    if (wtx.tx->nType != TRANSACTION_SAPLING || CachedTxIsFromMe(*this, wtx, ISMINE_ALL)) return false;
+    // Ours if it spends one of our notes. Matched by nullifier rather than a
+    // note's spendingTxid, which is only set once the transaction reaches the
+    // mempool, after the wallet first submits its own transaction.
+    const auto payload = GetTxPayload<SaplingTxPayload>(*wtx.tx, /*assert_type=*/false);
+    return !payload || m_sapling_key_manager.NotesSpentBy(*payload).empty();
+}
+
 bool CWallet::CanTxBeResent(const CWalletTx& wtx) const
 {
     AssertLockHeld(cs_wallet);
@@ -2782,6 +2795,9 @@ bool CWallet::CanTxBeResent(const CWalletTx& wtx) const
     return
         // Can't relay if wallet is not broadcasting
         GetBroadcastTransactions() &&
+        // Don't relay a shielded payment someone else sent us: announcing it
+        // from our address would tie us to a transaction nothing else links us to.
+        !IsReceivedShieldedOnly(wtx) &&
         // Don't relay abandoned transactions
         !wtx.isAbandoned() &&
         // Don't try to submit coinbase transactions. These would fail anyway but would
