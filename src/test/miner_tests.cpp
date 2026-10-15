@@ -36,7 +36,12 @@ using node::BlockAssembler;
 using node::CBlockTemplate;
 
 namespace miner_tests {
+// Regtest, not mainnet: under Kerrigan's mainnet proof of work each block takes
+// minutes to grind, and the retarget pushes blocks stamped a second apart past
+// any 32-bit nonce, so a precomputed BLOCKINFO table cannot be kept. Regtest
+// has a fixed, trivial difficulty, and nothing tested here depends on it.
 struct MinerTestingSetup : public TestingSetup {
+    MinerTestingSetup() : TestingSetup{CBaseChainParams::REGTEST} {}
     void TestPackageSelection(const CChainParams& chainparams, const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_node.mempool->cs);
     void TestBasicMining(const CChainParams& chainparams, const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst, int baseheight) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_node.mempool->cs);
     void TestPrioritisedMining(const CChainParams& chainparams, const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst) EXCLUSIVE_LOCKS_REQUIRED(::cs_main, m_node.mempool->cs);
@@ -102,6 +107,9 @@ static std::unique_ptr<CBlockIndex> CreateBlockIndex(int nHeight, CBlockIndex* a
 // to allow reusing the blockchain created in CreateNewBlock_validity.
 void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst)
 {
+    // Value of the coinbase outputs these transactions spend (Bitcoin's
+    // tests hard-code its 50 coins; Kerrigan's miner output is smaller).
+    const CAmount COINBASE_OUT = txFirst[0]->vout[0].nValue;
     // Disable free transactions, otherwise TX selection is non-deterministic
     gArgs.SoftSetArg("-blockprioritysize", "0");
 
@@ -116,20 +124,20 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
     tx.vin[0].prevout.hash = txFirst[0]->GetHash();
     tx.vin[0].prevout.n = 0;
     tx.vout.resize(1);
-    tx.vout[0].nValue = 5000000000LL - 1000;
+    tx.vout[0].nValue = COINBASE_OUT - 1000;
     // This tx has a low fee: 1000 satoshis
     uint256 hashParentTx = tx.GetHash(); // save this txid for later use
     m_node.mempool->addUnchecked(entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
 
     // This tx has a medium fee: 10000 satoshis
     tx.vin[0].prevout.hash = txFirst[1]->GetHash();
-    tx.vout[0].nValue = 5000000000LL - 10000;
+    tx.vout[0].nValue = COINBASE_OUT - 10000;
     uint256 hashMediumFeeTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(10000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
 
     // This tx has a high fee, but depends on the first transaction
     tx.vin[0].prevout.hash = hashParentTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000; // 50k satoshi fee
+    tx.vout[0].nValue = COINBASE_OUT - 1000 - 50000; // 50k satoshi fee
     uint256 hashHighFeeTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(50000).Time(Now<NodeSeconds>()).SpendsCoinbase(false).FromTx(tx));
 
@@ -141,7 +149,7 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
 
     // Test that a package below the block min tx fee doesn't get included
     tx.vin[0].prevout.hash = hashHighFeeTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000; // 0 fee
+    tx.vout[0].nValue = COINBASE_OUT - 1000 - 50000; // 0 fee
     uint256 hashFreeTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(0).FromTx(tx));
     size_t freeTxSize = GetVirtualTransactionSize(CTransaction(tx));
@@ -151,7 +159,7 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
     CAmount feeToUse = blockMinFeeRate.GetFee(2*freeTxSize) - 1;
 
     tx.vin[0].prevout.hash = hashFreeTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 50000 - feeToUse;
+    tx.vout[0].nValue = COINBASE_OUT - 1000 - 50000 - feeToUse;
     uint256 hashLowFeeTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(feeToUse).FromTx(tx));
     pblocktemplate = AssemblerForTest(chainparams).CreateNewBlock(scriptPubKey);
@@ -178,7 +186,7 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
     // Add a 0-fee transaction that has 2 outputs.
     tx.vin[0].prevout.hash = txFirst[2]->GetHash();
     tx.vout.resize(2);
-    tx.vout[0].nValue = 5000000000LL - 100000000;
+    tx.vout[0].nValue = COINBASE_OUT - 100000000;
     tx.vout[1].nValue = 100000000; // 1BTC output
     uint256 hashFreeTx2 = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(0).SpendsCoinbase(true).FromTx(tx));
@@ -187,7 +195,7 @@ void MinerTestingSetup::TestPackageSelection(const CChainParams& chainparams, co
     tx.vin[0].prevout.hash = hashFreeTx2;
     tx.vout.resize(1);
     feeToUse = blockMinFeeRate.GetFee(freeTxSize);
-    tx.vout[0].nValue = 5000000000LL - 100000000 - feeToUse;
+    tx.vout[0].nValue = COINBASE_OUT - 100000000 - feeToUse;
     uint256 hashLowFeeTx2 = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(feeToUse).SpendsCoinbase(false).FromTx(tx));
     pblocktemplate = AssemblerForTest(chainparams).CreateNewBlock(scriptPubKey);
@@ -219,20 +227,31 @@ void MinerTestingSetup::TestBasicMining(const CChainParams& chainparams, const C
     auto pblocktemplate = AssemblerForTest(chainparams).CreateNewBlock(scriptPubKey);
     BOOST_CHECK(pblocktemplate);
 
-    const CAmount BLOCKSUBSIDY = 500*COIN;
-    const CAmount LOWFEE = CENT;
+    // What the spent coinbase outputs actually pay, not an inherited constant.
+    const CAmount BLOCKSUBSIDY = txFirst[0]->vout[0].nValue;
+    for (const auto& coinbase : txFirst) BOOST_REQUIRE_EQUAL(coinbase->vout[0].nValue, BLOCKSUBSIDY);
+    // The sigops checks below need one transaction past the block sigop limit
+    // at 20 sigops each (2001 under DIP0001's 40000, not Bitcoin's 1001), all
+    // chained from one coinbase output paying LOWFEE each. Kerrigan's miner
+    // output is far smaller than Bitcoin's 50 or Dash's 500 coins, so the fee
+    // is scaled to fit the chain into it.
+    const unsigned int SIGOP_TXS = MaxBlockSigOps() / 20 + 1;
+    const CAmount LOWFEE = BLOCKSUBSIDY / (2 * SIGOP_TXS);
+    BOOST_REQUIRE(LOWFEE > 0);
     const CAmount HIGHFEE = COIN;
     const CAmount HIGHERFEE = 4*COIN;
 
-    // block sigops > limit: 1000 CHECKMULTISIG + 1
+    // block sigops > limit: SIGOP_TXS CHECKMULTISIGs
     tx.vin.resize(1);
-    // NOTE: OP_NOP is used to force 20 SigOps for the CHECKMULTISIG
-    tx.vin[0].scriptSig = CScript() << OP_0 << OP_0 << OP_0 << OP_NOP << OP_CHECKMULTISIG << OP_1;
+    // NOTE: OP_NOP is used to force 20 SigOps for the CHECKMULTISIG.
+    // OP_DROP leaves exactly one stack item: Kerrigan enforces CLEANSTACK in
+    // blocks from genesis, which Bitcoin and Dash do not.
+    tx.vin[0].scriptSig = CScript() << OP_0 << OP_0 << OP_0 << OP_NOP << OP_CHECKMULTISIG << OP_DROP << OP_1;
     tx.vin[0].prevout.hash = txFirst[0]->GetHash();
     tx.vin[0].prevout.n = 0;
     tx.vout.resize(1);
     tx.vout[0].nValue = BLOCKSUBSIDY;
-    for (unsigned int i = 0; i < 1001; ++i)
+    for (unsigned int i = 0; i < SIGOP_TXS; ++i)
     {
         tx.vout[0].nValue -= LOWFEE;
         hash = tx.GetHash();
@@ -247,7 +266,7 @@ void MinerTestingSetup::TestBasicMining(const CChainParams& chainparams, const C
 
     tx.vin[0].prevout.hash = txFirst[0]->GetHash();
     tx.vout[0].nValue = BLOCKSUBSIDY;
-    for (unsigned int i = 0; i < 1001; ++i)
+    for (unsigned int i = 0; i < SIGOP_TXS; ++i)
     {
         tx.vout[0].nValue -= LOWFEE;
         hash = tx.GetHash();
@@ -468,13 +487,13 @@ void MinerTestingSetup::TestBasicMining(const CChainParams& chainparams, const C
     tx.vin[0].nSequence = CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG | 1;
     BOOST_CHECK(!TestSequenceLocks(CTransaction{tx})); // Sequence locks fail
 
-    BOOST_CHECK(pblocktemplate = AssemblerForTest(chainparams).CreateNewBlock(scriptPubKey));
-
-    // None of the of the absolute height/time locked tx should have made
-    // it into the template because we still check IsFinalTx in CreateNewBlock,
-    // but relative locked txs will if inconsistently added to mempool.
-    // For now these will still generate a valid template until BIP68 soft fork
-    BOOST_CHECK_EQUAL(pblocktemplate->block.vtx.size(), 3U);
+    // None of the absolute height/time locked txs make it into the template,
+    // because CreateNewBlock checks IsFinalTx, but the relative locked txs
+    // added to the mempool above (inconsistently, bypassing its checks) do.
+    // Bitcoin's test runs below the BIP68 activation height, so its template
+    // is still valid here; Kerrigan enforces BIP68 from genesis, so the
+    // template fails its own validity check.
+    BOOST_CHECK_EXCEPTION(AssemblerForTest(chainparams).CreateNewBlock(scriptPubKey), std::runtime_error, HasReason("bad-txns-nonfinal"));
     // However if we advance height by 1 and time by SEQUENCE_LOCK_TIME, all of them should be mined
     for (int i = 0; i < CBlockIndex::nMedianTimeSpan; ++i) {
         CBlockIndex* ancestor{Assert(m_node.chainman->ActiveChain().Tip()->GetAncestor(m_node.chainman->ActiveChain().Tip()->nHeight - i))};
@@ -484,6 +503,9 @@ void MinerTestingSetup::TestBasicMining(const CChainParams& chainparams, const C
 
 void MinerTestingSetup::TestPrioritisedMining(const CChainParams& chainparams, const CScript& scriptPubKey, const std::vector<CTransactionRef>& txFirst)
 {
+    // Value of the coinbase outputs these transactions spend (Bitcoin's
+    // tests hard-code its 50 coins; Kerrigan's miner output is smaller).
+    const CAmount COINBASE_OUT = txFirst[0]->vout[0].nValue;
     TestMemPoolEntryHelper entry;
 
     // Test that a tx below min fee but prioritised is included
@@ -493,28 +515,28 @@ void MinerTestingSetup::TestPrioritisedMining(const CChainParams& chainparams, c
     tx.vin[0].prevout.n = 0;
     tx.vin[0].scriptSig = CScript() << OP_1;
     tx.vout.resize(1);
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = COINBASE_OUT; // 0 fee
     uint256 hashFreePrioritisedTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(0).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
     m_node.mempool->PrioritiseTransaction(hashFreePrioritisedTx, 5 * COIN);
 
     tx.vin[0].prevout.hash = txFirst[1]->GetHash();
     tx.vin[0].prevout.n = 0;
-    tx.vout[0].nValue = 5000000000LL - 1000;
+    tx.vout[0].nValue = COINBASE_OUT - 1000;
     // This tx has a low fee: 1000 satoshis
     uint256 hashParentTx = tx.GetHash(); // save this txid for later use
     m_node.mempool->addUnchecked(entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
 
     // This tx has a medium fee: 10000 satoshis
     tx.vin[0].prevout.hash = txFirst[2]->GetHash();
-    tx.vout[0].nValue = 5000000000LL - 10000;
+    tx.vout[0].nValue = COINBASE_OUT - 10000;
     uint256 hashMediumFeeTx = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(10000).Time(Now<NodeSeconds>()).SpendsCoinbase(true).FromTx(tx));
     m_node.mempool->PrioritiseTransaction(hashMediumFeeTx, -5 * COIN);
 
     // This tx also has a low fee, but is prioritised
     tx.vin[0].prevout.hash = hashParentTx;
-    tx.vout[0].nValue = 5000000000LL - 1000 - 1000; // 1000 satoshi fee
+    tx.vout[0].nValue = COINBASE_OUT - 1000 - 1000; // 1000 satoshi fee
     uint256 hashPrioritsedChild = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(1000).Time(Now<NodeSeconds>()).SpendsCoinbase(false).FromTx(tx));
     m_node.mempool->PrioritiseTransaction(hashPrioritsedChild, 2 * COIN);
@@ -526,19 +548,19 @@ void MinerTestingSetup::TestPrioritisedMining(const CChainParams& chainparams, c
     // FreeParent's prioritisation should not be included in that entry.
     // When FreeChild is included, FreeChild's prioritisation should also not be included.
     tx.vin[0].prevout.hash = txFirst[3]->GetHash();
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = COINBASE_OUT; // 0 fee
     uint256 hashFreeParent = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(0).SpendsCoinbase(true).FromTx(tx));
     m_node.mempool->PrioritiseTransaction(hashFreeParent, 10 * COIN);
 
     tx.vin[0].prevout.hash = hashFreeParent;
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = COINBASE_OUT; // 0 fee
     uint256 hashFreeChild = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(0).SpendsCoinbase(false).FromTx(tx));
     m_node.mempool->PrioritiseTransaction(hashFreeChild, 1 * COIN);
 
     tx.vin[0].prevout.hash = hashFreeChild;
-    tx.vout[0].nValue = 5000000000LL; // 0 fee
+    tx.vout[0].nValue = COINBASE_OUT; // 0 fee
     uint256 hashFreeGrandchild = tx.GetHash();
     m_node.mempool->addUnchecked(entry.Fee(0).SpendsCoinbase(false).FromTx(tx));
 
@@ -561,7 +583,7 @@ void MinerTestingSetup::TestPrioritisedMining(const CChainParams& chainparams, c
 BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
 {
     // Note that by default, these tests run with size accounting enabled.
-    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::REGTEST);
     const CChainParams& chainparams = *chainParams;
     CScript scriptPubKey = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
     std::unique_ptr<CBlockTemplate> pblocktemplate, pemptyblocktemplate;
@@ -576,13 +598,23 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
 
     auto createAndProcessEmptyBlock = [&]() {
         int i = m_node.chainman->ActiveChain().Height() % blockinfo_size;
-        CBlock *pblock = &pemptyblocktemplate->block; // pointer for convenience
+        // Kerrigan requires a CbTx coinbase from height 2, and its payload is
+        // specific to the height, so every block gets a fresh template and
+        // keeps the coinbase CreateNewBlock built. Only the extranonce and the
+        // first output (made spendable by the tests below) change. The block
+        // stays empty: the template is built without the mempool, which the
+        // tests fill with transactions that are not final yet.
+        BlockAssembler::Options options;
+        options.nBlockMaxSize = DEFAULT_BLOCK_MAX_SIZE;
+        options.blockMinFeeRate = blockMinFeeRate;
+        std::unique_ptr<CBlockTemplate> blocktemplate =
+            BlockAssembler(m_node.chainman->ActiveChainstate(), m_node, /*mempool=*/nullptr, chainparams, options).CreateNewBlock(scriptPubKey);
+        CBlock *pblock = &blocktemplate->block; // pointer for convenience
         {
             LOCK(cs_main);
             pblock->nVersion = VERSIONBITS_TOP_BITS;
             pblock->nTime = m_node.chainman->ActiveChain().Tip()->GetMedianTimePast()+1;
             CMutableTransaction txCoinbase(*pblock->vtx[0]);
-            txCoinbase.nVersion = 1;
             txCoinbase.vin[0].scriptSig = CScript{} << (m_node.chainman->ActiveChain().Height() + 1) << BLOCKINFO[i].extranonce;
             txCoinbase.vout[0].scriptPubKey = CScript();
             pblock->vtx[0] = MakeTransactionRef(std::move(txCoinbase));
@@ -601,7 +633,6 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
         }
         std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(*pblock);
         BOOST_CHECK(Assert(m_node.chainman)->ProcessNewBlock(shared_pblock, true, nullptr));
-        pblock->hashPrevBlock = pblock->GetHash();
     };
 
     for ([[maybe_unused]] const auto& _ : BLOCKINFO) {
