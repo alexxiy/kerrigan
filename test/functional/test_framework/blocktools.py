@@ -26,14 +26,40 @@ from .script import (
     CScript,
     CScriptNum,
     CScriptOp,
+    OP_RETURN,
     OP_TRUE
 )
 from .script_util import (
     key_to_p2pk_script,
+    keyhash_to_p2pkh_script,
 )
 from .util import assert_equal
 
 MAX_BLOCK_SIGOPS = 40000
+
+# Kerrigan regtest block reward (src/validation.cpp GetBlockSubsidyInner and
+# src/masternode/payments.cpp GetBlockTxOuts). Of the 25-coin subsidy, 40% goes
+# to the growth escrow (burned with OP_RETURN after REGTEST_ESCROW_END_HEIGHT),
+# 15% to the dev fund, 5% to founders and 20% to the masternode payee; with no
+# masternodes registered the masternode share stays with the miner. The
+# treasury hashes are the regtest test-only ones from src/chainparams.cpp.
+REGTEST_SUBSIDY = 25 * 100000000
+REGTEST_HALVING_INTERVAL = 1051200
+REGTEST_ESCROW_END_HEIGHT = 499
+REGTEST_ESCROW_SCRIPT = keyhash_to_p2pkh_script(bytes.fromhex("b0841b8f59f554fb92c7951ed9f890faba8e8f89"))
+REGTEST_DEVFUND_SCRIPT = keyhash_to_p2pkh_script(bytes.fromhex("5d9f2310a8602b46e6e93c8277a8c9e8ea7c7ee6"))
+REGTEST_FOUNDERS_SCRIPT = keyhash_to_p2pkh_script(bytes.fromhex("fd264480b44878cdf763c9cf4daa354bbb87a4e8"))
+
+
+def regtest_treasury_outputs(height, total):
+    """The coinbase outputs consensus requires besides the miner's, for a block
+    at `height` paying `total` (subsidy plus fees) with no masternodes."""
+    escrow_script = CScript([OP_RETURN]) if height > REGTEST_ESCROW_END_HEIGHT else REGTEST_ESCROW_SCRIPT
+    return [
+        CTxOut(total * 40 // 100, escrow_script),
+        CTxOut(total * 15 // 100, REGTEST_DEVFUND_SCRIPT),
+        CTxOut(total * 5 // 100, REGTEST_FOUNDERS_SCRIPT),
+    ]
 
 # Genesis block time (regtest)
 TIME_GENESIS_BLOCK = 1773446400
@@ -171,23 +197,32 @@ def script_BIP34_coinbase_height(height):
     return CScript([CScriptNum(height)])
 
 
-def create_coinbase(height, pubkey=None, dip4_activated=False, v20_activated=False, nValue=500):
+def create_coinbase(height, pubkey=None, dip4_activated=False, v20_activated=False, nValue=None):
     """Create a coinbase transaction, assuming no miner fees.
 
-    If pubkey is passed in, the coinbase output will be a P2PK output;
+    By default it pays the Kerrigan regtest block reward split as consensus
+    requires with no masternodes registered: the miner output first, then the
+    growth escrow, dev fund and founders outputs. Passing nValue (in coins)
+    instead makes a single miner output of that value, for tests that build
+    coinbases consensus rejects.
+
+    If pubkey is passed in, the miner output will be a P2PK output;
     otherwise an anyone-can-spend output."""
     coinbase = CTransaction()
     coinbase.vin.append(CTxIn(COutPoint(0, 0xffffffff), script_BIP34_coinbase_height(height), SEQUENCE_FINAL))
     coinbaseoutput = CTxOut()
-    coinbaseoutput.nValue = nValue * COIN
-    if nValue == 500:
-        halvings = int(height / 150)  # regtest
-        coinbaseoutput.nValue >>= halvings
+    treasury = []
+    if nValue is None:
+        total = REGTEST_SUBSIDY >> (height // REGTEST_HALVING_INTERVAL)
+        treasury = regtest_treasury_outputs(height, total)
+        coinbaseoutput.nValue = total - sum(out.nValue for out in treasury)
+    else:
+        coinbaseoutput.nValue = nValue * COIN
     if (pubkey is not None):
         coinbaseoutput.scriptPubKey = key_to_p2pk_script(pubkey)
     else:
         coinbaseoutput.scriptPubKey = CScript([OP_TRUE])
-    coinbase.vout = [coinbaseoutput]
+    coinbase.vout = [coinbaseoutput] + treasury
     if dip4_activated:
         coinbase.nVersion = 3
         coinbase.nType = 5
