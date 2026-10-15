@@ -30,6 +30,16 @@ class CQuorumManager;
 } // namespace llmq
 
 namespace instantsend {
+/**
+ * Masternodes do not sign InstantSend locks for a transaction with more
+ * transparent inputs than this. Each input is its own signing session in the
+ * quorum, so a few large consolidations can hold up locks for everyone (the
+ * 2026-10-03 mainnet stall: transactions with 55 to 264 inputs). Such a
+ * transaction confirms normally; ChainLocks and miners already accept a
+ * transaction that is not locked after WAIT_FOR_ISLOCK_TIMEOUT.
+ */
+static constexpr size_t MAX_INSTANTSEND_INPUTS{25};
+
 class InstantSendSignerParent
 {
 public:

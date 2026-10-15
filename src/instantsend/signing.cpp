@@ -293,6 +293,14 @@ void InstantSendSigner::ProcessTx(const CTransaction& tx, bool fRetroactive, con
         return;
     }
 
+    // Applies to mempool and retroactive (in-block) signing alike: the cost
+    // per input is the same either way.
+    if (tx.vin.size() > MAX_INSTANTSEND_INPUTS) {
+        LogPrint(BCLog::INSTANTSEND, "%s -- txid=%s: %d inputs, more than %d; not signing\n", __func__,
+                 tx.GetHash().ToString(), tx.vin.size(), MAX_INSTANTSEND_INPUTS);
+        return;
+    }
+
     if (!CheckCanLock(tx, true, params)) {
         LogPrint(BCLog::INSTANTSEND, "%s -- txid=%s: CheckCanLock returned false\n", __func__, tx.GetHash().ToString());
         return;
