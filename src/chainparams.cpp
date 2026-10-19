@@ -624,15 +624,17 @@ public:
         // are deliberately not sunsetted (governance consolidation path).
         consensus.nLegacyDevfundSunsetHeight = 59000;
 
-        // Operator-side deprecation height (v1.2.5). v1.2.5 deprecates itself
-        // at h=184000 (~6 months at 2-min blocks from the v1.2.5 ship tip).
+        // Operator-side deprecation height (v1.2.5). Each release deprecates
+        // itself about 6 months after it ships. v1.2.5 to v1.3.2 stop at
+        // h=184000; v1.4.0 at h=290000 (~6 months from the v1.4.0 ship tip
+        // h~170000 at the measured ~652 blocks/day).
         // ~15,000 blocks before the deprecation height, the GUI banner is set
         // on every tip update and a log line is written every 100 blocks; at
         // the height itself the daemon refuses to extend the chain and shuts
         // down cleanly. Forces operators onto the next release rather than
         // letting a stale codebase view linger. NOT consensus -- newer daemons
         // mine straight through. See deprecation.h.
-        consensus.nDeprecationHeight = 184000;
+        consensus.nDeprecationHeight = 290000;
 
         // "KRGN" Kerrigan mainnet network magic
         pchMessageStart[0] = 0x4b; // K
