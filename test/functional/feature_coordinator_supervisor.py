@@ -140,7 +140,9 @@ class CoordinatorSupervisorTest(BitcoinTestFramework):
         assert "--directory-allow-private" in argv
         assert "--public-url" not in argv  # not a BroodNode: no registered address to advertise
         assert "--iroh-port" not in argv
-        assert_equal(start["env"], {})
+        # No credentials in the environment with cookie auth; only the
+        # node's pid, so the coordinator can tell it was orphaned at startup.
+        assert_equal(start["env"], {"KRGN_PARENT_PID": str(node.process.pid)})
         assert_equal(self.log_fds_in_node(), 0)
 
         self.log.info("a coordinator that dies is restarted after a backoff")
@@ -169,7 +171,8 @@ class CoordinatorSupervisorTest(BitcoinTestFramework):
         self.tick()
         self.wait_until(lambda: len(self.starts()) == 3)
         start = [s for s in self.starts() if s["pid"] == node.getcoordinatorinfo()["pid"]][0]
-        assert_equal(start["env"], {"KRGN_RPC_USER": "coordtest", "KRGN_RPC_PASS": "coordsecret"})
+        assert_equal(start["env"], {"KRGN_RPC_USER": "coordtest", "KRGN_RPC_PASS": "coordsecret",
+                                    "KRGN_PARENT_PID": str(node.process.pid)})
         assert "--rpc-cookie-file" not in start["argv"]
         assert "coordsecret" not in " ".join(start["argv"])
 

@@ -226,6 +226,11 @@ std::optional<CoordinatorSupervisor::LaunchPlan> CoordinatorSupervisor::Plan(std
         "--bind", bind,
         "--exit-with-parent",
     };
+#ifndef WIN32
+    // Lets the coordinator tell, at startup, that this process has already
+    // exited and it was re-parented, so an orphan does not keep the port.
+    plan.env["KRGN_PARENT_PID"] = strprintf("%d", getpid());
+#endif
     // The RPC password never goes on the command line, where other users can read it.
     const std::string rpc_password = m_args.GetArg("-rpcpassword", "");
     if (!rpc_password.empty()) {
