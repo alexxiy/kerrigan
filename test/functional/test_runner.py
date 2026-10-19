@@ -108,6 +108,7 @@ BASE_SCRIPTS = [
     'feature_sapling_activation.py',
     'feature_sapling_repair_rearm.py',
     'feature_sapling_repair_partial.py',
+    'wallet_sapling_change_chain.py',
     'wallet_sapling_viewingkey_norelay.py',
     'feature_sapling_spent_note_integrity.py',
     'feature_sapling_islock_mining.py',

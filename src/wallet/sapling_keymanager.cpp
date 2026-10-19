@@ -1331,25 +1331,68 @@ std::vector<std::pair<uint256, SaplingNoteData>> SaplingKeyManager::GetUnspentNo
     // change of change). Unattributable change (inputs from several addresses,
     // or none of ours) belongs to no external address and stays reachable
     // through its own internal address and the wallet total.
-    std::function<std::optional<sapling::SaplingPaymentAddress>(const SaplingNoteData&, int)> owner =
-        [&](const SaplingNoteData& nd, int depth) -> std::optional<sapling::SaplingPaymentAddress> {
-        if (!internalIvks.count(nd.ivk)) return nd.recipient;
-        if (depth >= 32) return std::nullopt;
-        auto it = inputsByTxid.find(nd.txid);
-        if (it == inputsByTxid.end()) return std::nullopt;
-        std::optional<sapling::SaplingPaymentAddress> source;
-        for (const SaplingNoteData* input : it->second) {
-            auto inputOwner = owner(*input, depth + 1);
-            if (!inputOwner || (source && !(*source == *inputOwner))) return std::nullopt;
-            source = inputOwner;
+    //
+    // Change chains grow by one generation per send, so the walk has no depth
+    // limit. It is iterative so a long chain cannot exhaust the stack, and
+    // memoised per funding transaction (every change note of a transaction
+    // shares its source) so the total work is bounded by the number of notes.
+    std::map<uint256, std::optional<sapling::SaplingPaymentAddress>> sourceByTxid;
+    auto sourceOf = [&](const uint256& rootTxid) -> std::optional<sapling::SaplingPaymentAddress> {
+        // A transaction is on the path from first visit until it is resolved.
+        // Meeting one again means a cycle, which no valid chain can produce;
+        // its notes are then left unattributed rather than looping.
+        std::set<uint256> onPath;
+        std::vector<uint256> stack{rootTxid};
+        while (!stack.empty()) {
+            const uint256 txid = stack.back();
+            if (sourceByTxid.count(txid)) {
+                stack.pop_back();
+                continue;
+            }
+            auto it = inputsByTxid.find(txid);
+            if (it == inputsByTxid.end()) {
+                sourceByTxid.emplace(txid, std::nullopt);
+                stack.pop_back();
+                continue;
+            }
+            if (onPath.insert(txid).second) {
+                bool descended = false;
+                for (const SaplingNoteData* input : it->second) {
+                    if (!internalIvks.count(input->ivk) || sourceByTxid.count(input->txid) || onPath.count(input->txid)) continue;
+                    stack.push_back(input->txid);
+                    descended = true;
+                }
+                if (descended) continue;
+            }
+            std::optional<sapling::SaplingPaymentAddress> source;
+            for (const SaplingNoteData* input : it->second) {
+                std::optional<sapling::SaplingPaymentAddress> inputOwner;
+                if (!internalIvks.count(input->ivk)) {
+                    inputOwner = input->recipient;
+                } else if (auto found = sourceByTxid.find(input->txid); found != sourceByTxid.end()) {
+                    inputOwner = found->second;
+                }
+                if (!inputOwner || (source && !(*source == *inputOwner))) {
+                    source.reset();
+                    break;
+                }
+                source = inputOwner;
+            }
+            sourceByTxid.emplace(txid, source);
+            onPath.erase(txid);
+            stack.pop_back();
         }
-        return source;
+        return sourceByTxid.at(rootTxid);
+    };
+    auto owner = [&](const SaplingNoteData& nd) -> std::optional<sapling::SaplingPaymentAddress> {
+        if (!internalIvks.count(nd.ivk)) return nd.recipient;
+        return sourceOf(nd.txid);
     };
 
     std::vector<std::pair<uint256, SaplingNoteData>> result;
     for (const auto& [key, nd] : mapSaplingNotes) {
         if (nd.isSpent || nd.blockHeight < 0 || nd.witnessData.empty() || m_reservedNotes.count(key)) continue;
-        if (nd.recipient == addr || (internalIvks.count(nd.ivk) && owner(nd, 0) == addr)) {
+        if (nd.recipient == addr || (internalIvks.count(nd.ivk) && owner(nd) == addr)) {
             result.emplace_back(key, nd);
         }
     }
