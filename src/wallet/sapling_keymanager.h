@@ -561,14 +561,15 @@ public:
      * re-confirmed if they appear in the new fork.
      */
     /**
-     * Clear the spent flag on every note recorded as spent by spendingTxid.
-     * Returns how many notes were released.
+     * Clear the spent flag on one note, if it is still recorded as spent by
+     * spendingTxid. Returns whether the note was released.
      *
-     * Callers MUST have positive evidence that the spend did not happen (see
-     * CWallet::RepairStaleSaplingSpends). Releasing a note whose nullifier is
-     * on chain makes already-spent funds look spendable.
+     * Callers MUST have positive evidence that this note's nullifier is not on
+     * chain (see CWallet::RepairStaleSaplingSpends). Do not release every note
+     * a transaction spent on the strength of one: a competing spend may have
+     * mined some of them, and releasing those makes spent funds look spendable.
      */
-    size_t UnmarkSpentBy(const uint256& spendingTxid, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool UnmarkSpent(const uint256& key, const uint256& spendingTxid, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     void RewindBlock(int height, const CBlock& block, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };

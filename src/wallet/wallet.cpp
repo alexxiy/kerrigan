@@ -1942,7 +1942,9 @@ void CWallet::RepairStaleSaplingSpends()
     }
     if (candidates.empty()) return;
 
-    std::set<uint256> releasable;
+    // A transaction can spend several notes and a competing spend may have
+    // mined only some of them, so the verdict is per note, never per tx.
+    std::vector<std::pair<uint256, uint256>> releasable;
     for (const auto& [cmu, nullifier, spendingTxid] : candidates) {
         // 1. The chain is the authority. Only a definite "absent" is evidence.
         const std::optional<bool> spent_on_chain{chain().hasSaplingNullifier(nullifier)};
@@ -1961,14 +1963,14 @@ void CWallet::RepairStaleSaplingSpends()
         const CWalletTx& wtx = it->second;
         if (wtx.InMempool() || GetTxDepthInMainChain(wtx) > 0) continue;
 
-        releasable.insert(spendingTxid);
+        releasable.emplace_back(cmu, spendingTxid);
     }
     if (releasable.empty()) return;
 
     WalletBatch batch(GetDatabase());
     size_t released = 0;
-    for (const uint256& txid : releasable) {
-        released += m_sapling_key_manager.UnmarkSpentBy(txid, &batch);
+    for (const auto& [cmu, spendingTxid] : releasable) {
+        if (m_sapling_key_manager.UnmarkSpent(cmu, spendingTxid, &batch)) ++released;
     }
     if (released) {
         WalletLogPrintf("Sapling: released %u note(s) whose nullifier is absent from the chain "
