@@ -662,11 +662,13 @@ public:
     void AddSaplingTransactions(const CBlock& block, int height, bool rescanning_old_block) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /**
-     * True for a Sapling transaction the wallet only received: it takes no
-     * transparent input of ours and spends none of our notes. The wallet
-     * never resubmits or rebroadcasts such a transaction.
+     * True for a Sapling transaction this wallet did not build: it takes no
+     * transparent input of ours and was not committed here. Spending notes we
+     * can see does not make it ours, since a full viewing key derives their
+     * nullifiers too. The wallet never resubmits or rebroadcasts such a
+     * transaction.
      */
-    bool IsReceivedShieldedOnly(const CWalletTx& wtx) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool IsShieldedNotFromMe(const CWalletTx& wtx) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /**
      * Replay Sapling blocks using a pre-captured block-hash snapshot.

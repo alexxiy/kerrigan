@@ -2765,8 +2765,8 @@ void CWallet::ReacceptWalletTransactions()
 
         int nDepth = GetTxDepthInMainChain(wtx);
 
-        // A shielded payment someone else sent us is not ours to resubmit (see CanTxBeResent).
-        if (!wtx.IsCoinBase() && (nDepth == 0 && !IsTxLockedByInstantSend(wtx) && !wtx.isAbandoned()) && !IsReceivedShieldedOnly(wtx)) {
+        // A shielded transaction this wallet did not build is not ours to resubmit (see CanTxBeResent).
+        if (!wtx.IsCoinBase() && (nDepth == 0 && !IsTxLockedByInstantSend(wtx) && !wtx.isAbandoned()) && !IsShieldedNotFromMe(wtx)) {
             mapSorted.insert(std::make_pair(wtx.nOrderPos, &wtx));
         }
     }
@@ -2779,15 +2779,15 @@ void CWallet::ReacceptWalletTransactions()
     }
 }
 
-bool CWallet::IsReceivedShieldedOnly(const CWalletTx& wtx) const
+bool CWallet::IsShieldedNotFromMe(const CWalletTx& wtx) const
 {
     AssertLockHeld(cs_wallet);
     if (wtx.tx->nType != TRANSACTION_SAPLING || CachedTxIsFromMe(*this, wtx, ISMINE_ALL)) return false;
-    // Ours if it spends one of our notes. Matched by nullifier rather than a
-    // note's spendingTxid, which is only set once the transaction reaches the
-    // mempool, after the wallet first submits its own transaction.
-    const auto payload = GetTxPayload<SaplingTxPayload>(*wtx.tx, /*assert_type=*/false);
-    return !payload || m_sapling_key_manager.NotesSpentBy(*payload).empty();
+    // Only provenance counts. A wallet holding just a viewing key recognises
+    // the owner's spend by nullifier, and announcing it would link this node
+    // to a transaction Sapling keeps unlinkable. fFromMe is set and persisted
+    // by CommitTransaction before the first broadcast.
+    return !wtx.fFromMe;
 }
 
 bool CWallet::CanTxBeResent(const CWalletTx& wtx) const
@@ -2797,9 +2797,9 @@ bool CWallet::CanTxBeResent(const CWalletTx& wtx) const
     return
         // Can't relay if wallet is not broadcasting
         GetBroadcastTransactions() &&
-        // Don't relay a shielded payment someone else sent us: announcing it
-        // from our address would tie us to a transaction nothing else links us to.
-        !IsReceivedShieldedOnly(wtx) &&
+        // Don't relay a shielded transaction this wallet did not build:
+        // announcing it would tie us to a transaction nothing else links us to.
+        !IsShieldedNotFromMe(wtx) &&
         // Don't relay abandoned transactions
         !wtx.isAbandoned() &&
         // Don't try to submit coinbase transactions. These would fail anyway but would
