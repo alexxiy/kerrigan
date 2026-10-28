@@ -332,6 +332,10 @@ RPCHelpMan z_sendmany()
             },
             {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, "Minimum confirmations for UTXOs/notes to use."},
             {"fee", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee in KRGN. Default: base (0.0001) + 0.00005 per spend + 0.00005 per output."},
+            {"ovk", RPCArg::Type::STR, RPCArg::Default{"none"}, "Which outgoing viewing key encrypts the shielded recipient outputs, one of:\n"
+                "\"none\": none. Only the recipients can read them, not this wallet or the source's viewing key.\n"
+                "\"sender\": the source address's. Its viewing key then shows each recipient, amount and memo.\n"
+                "Needs a shielded fromaddress."},
         },
         RPCResult{
             RPCResult::Type::STR_HEX, "txid", "The transaction id of the sent transaction"
@@ -339,6 +343,7 @@ RPCHelpMan z_sendmany()
         RPCExamples{
             HelpExampleCli("z_sendmany", "\"KSvgmrG5YH1yXqRx99XzXphsvkQXpjdFxK\" "
                            "'[{\"address\":\"ks1...\",\"amount\":10.0}]'")
+    + HelpExampleCli("z_sendmany", "\"ks1...\" '[{\"address\":\"ks1...\",\"amount\":10.0}]' 1 null \"sender\"")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
@@ -469,6 +474,14 @@ RPCHelpMan z_sendmany()
                     "z_sendmany requires at least one shielded address (use sendtoaddress for t->t)");
             }
 
+            const std::string ovkMode = request.params[4].isNull() ? "none" : request.params[4].get_str();
+            if (ovkMode != "none" && ovkMode != "sender") {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid ovk value. Must be \"none\" or \"sender\".");
+            }
+            if (ovkMode == "sender" && !fromIsShielded) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "ovk \"sender\" needs a shielded fromaddress");
+            }
+
             const auto& chainparams = Params();
             const auto& params = chainparams.GetConsensus();
             int tipHeight = pwallet->GetLastBlockHeight();
@@ -501,6 +514,9 @@ RPCHelpMan z_sendmany()
             std::optional<sapling::SaplingPaymentAddress> pendingChangeAddr;
             std::optional<sapling::SaplingIncomingViewingKey> pendingChangeIvk;
 
+            // The source's OVK for the recipient outputs, with ovk "sender".
+            std::optional<std::array<uint8_t, 32>> senderOvk;
+
             if (fromIsShielded) {
                 if (!km.CanSpend(fromSapling)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Don't have spending key for source address");
@@ -512,6 +528,15 @@ RPCHelpMan z_sendmany()
                 // Cleanse spending key on all exit paths
                 auto sk_guard = std::unique_ptr<void, std::function<void(void*)>>(
                     (void*)1, [&](void*) { if (sk) memory_cleanse(sk->key.data(), sk->key.size()); });
+
+                if (ovkMode == "sender") {
+                    auto senderFvk = km.GetFvk(fromSapling);
+                    if (!senderFvk) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Full viewing key not found for source address");
+                    }
+                    senderOvk.emplace();
+                    std::copy(senderFvk->ovk.begin(), senderFvk->ovk.end(), senderOvk->begin());
+                }
 
                 auto allNotesKeyed = km.GetUnspentNotesWithKeys(fromSapling);
                 std::vector<std::pair<uint256, SaplingNoteData>> notesKeyed;
@@ -786,15 +811,18 @@ RPCHelpMan z_sendmany()
             //     outCiphertext after sending). Change already uses internal OVK.
             //   - t->z: Use no OVK (the transparent source has no meaningful OVK;
             //     previously all-zeros OVK let ANY observer decrypt outCiphertext).
+            // ovk "sender" opts out for z->z: the source's OVK is used, so its
+            // viewing key shows who was paid, how much and the memo.
             for (const auto& r : recipients) {
                 if (r.isShielded) {
                     std::array<uint8_t, 43> toAddr;
                     std::copy(r.saplingAddr.d.begin(), r.saplingAddr.d.end(), toAddr.begin());
                     std::copy(r.saplingAddr.pk_d.begin(), r.saplingAddr.pk_d.end(), toAddr.begin() + 11);
 
-                    // No OVK for external recipients, prevents FVK compromise
-                    // from revealing who was paid and how much.
-                    if (!builder.AddSaplingOutputNoOvk(toAddr, r.amount, r.memo)) {
+                    const bool added = senderOvk
+                        ? builder.AddSaplingOutput(*senderOvk, toAddr, r.amount, r.memo)
+                        : builder.AddSaplingOutputNoOvk(toAddr, r.amount, r.memo);
+                    if (!added) {
                         for (const auto& op : lockedCoins) pwallet->UnlockCoin(op);
                         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to add shielded output");
                     }
@@ -1590,7 +1618,8 @@ RPCHelpMan z_viewtransaction()
         "Outputs are decrypted with the wallet's incoming viewing keys (payments received,\n"
         "whether or not the notes have since been spent) and its outgoing viewing keys\n"
         "(payments sent by wallets that keep one). Kerrigan Core does not keep an outgoing\n"
-        "viewing key on outputs it pays to others, so those outputs are not shown.\n"
+        "viewing key on outputs it pays to others, so those outputs are not shown, unless\n"
+        "z_sendmany was called with ovk \"sender\".\n"
         "Needs no spending key: works on a locked wallet and on a viewing-key-only wallet.\n"
         "A transaction outside the wallet and the mempool is found through -txindex (on by\n"
         "default), or through the block of a note it paid to this wallet.\n",

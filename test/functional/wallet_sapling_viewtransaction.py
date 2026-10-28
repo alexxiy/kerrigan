@@ -9,7 +9,8 @@ the wallet's viewing keys. A service that matches shielded payments to orders
 by memo needs it to keep working after the note is spent, from a viewing key
 alone, and while the wallet is locked.
 
-node0 pays, node1 receives, node2 holds only node1's viewing key.
+node0 pays, node1 receives, node2 holds only node1's viewing key, and later
+also the viewing key of a shielded address node0 pays from.
 """
 
 import os
@@ -21,6 +22,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 MATURITY = 100
 FEE = Decimal("0.001")
 MEMO_TEXT = "order 12 ✓"
+REFUND_MEMO = "refund 7"
 
 
 class SaplingViewTransactionTest(BitcoinTestFramework):
@@ -134,6 +136,57 @@ class SaplingViewTransactionTest(BitcoinTestFramework):
         view = node1.z_viewtransaction(pay_txid)
         assert_equal(view["outputs"][0]["memoStr"], MEMO_TEXT)
         assert_equal(node1.z_viewtransaction(spend_txid)["outputs"][0]["change"], True)
+
+        self.test_sender_ovk()
+
+    def test_sender_ovk(self):
+        node0, node1, node2 = self.nodes
+        # Payouts go to a wallet whose key neither node0 nor node2 holds, so
+        # that only an outgoing viewing key can recover them. (node2 holds
+        # node1's key, which covers every address of node1's wallet.)
+        node1.createwallet("payee")
+        self.payee = node1.get_wallet_rpc("payee").z_getnewaddress()
+        node1.unloadwallet("payee")
+        # -txindex again: node2 finds payouts that pay none of its keys through it.
+        self.restart_node(2)
+        self.connect_nodes(2, 0)
+        self.wait_until(lambda: node2.getindexinfo("txindex")["txindex"]["synced"])
+        self.z0 = node0.z_getnewaddress()
+        node0.z_sendmany(self.t_addr, [{"address": self.z0, "amount": 10}], 1, FEE)
+        self.mine()
+        self.sync_all()
+        node2.z_importviewingkey(node0.z_exportviewingkey(self.z0), "yes", 0)
+
+        self.log.info("z->z without ovk: neither the payer nor the source's viewing key reads the payment")
+        txid = node0.z_sendmany(self.z0, [{"address": self.payee, "amount": 1}], 1, FEE)
+        self.mine()
+        self.sync_all()
+        assert_equal([o["change"] for o in node0.z_viewtransaction(txid)["outputs"]], [True])
+        view = node2.z_viewtransaction(txid)
+        assert_equal(len(view["spends"]), 1)
+        assert_equal(view["outputs"], [])
+
+        self.log.info("ovk \"sender\": the payer and the source's viewing key read the recipient, amount and memo")
+        memo_hex = REFUND_MEMO.encode().hex()
+        recipients = [{"address": self.payee, "amount": 2, "memo": memo_hex}, {"address": self.t_addr, "amount": Decimal("0.5")}]
+        txid = node0.z_sendmany(self.z0, recipients, 1, FEE, "sender")
+        self.mine()
+        self.sync_all()
+        for node in (node0, node2):
+            outgoing = [o for o in node.z_viewtransaction(txid)["outputs"] if o["outgoing"]]
+            assert_equal(len(outgoing), 1)
+            out = outgoing[0]
+            assert_equal(out["change"], False)
+            assert_equal(out["address"], self.payee)
+            assert_equal(out["valueSat"], 200000000)
+            assert_equal(out["memoStr"], REFUND_MEMO)
+        assert_equal(len(node0.z_viewtransaction(txid)["outputs"]), 2)  # and the change
+        assert_equal(len(node2.z_viewtransaction(txid)["outputs"]), 1)  # change is on the internal key
+
+        self.log.info("ovk errors")
+        assert_raises_rpc_error(-8, "Invalid ovk value", node0.z_sendmany, self.z0, [{"address": self.payee, "amount": 1}], 1, FEE, "all")
+        assert_raises_rpc_error(-8, "ovk \"sender\" needs a shielded fromaddress",
+                                node0.z_sendmany, self.t_addr, [{"address": self.payee, "amount": 1}], 1, FEE, "sender")
 
 
 if __name__ == '__main__':
