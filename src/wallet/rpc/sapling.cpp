@@ -336,6 +336,10 @@ RPCHelpMan z_sendmany()
                 "\"none\": none. Only the recipients can read them, not this wallet or the source's viewing key.\n"
                 "\"sender\": the source address's. Its viewing key then shows each recipient, amount and memo.\n"
                 "Needs a shielded fromaddress."},
+            {"change", RPCArg::Type::STR, RPCArg::Default{"internal"}, "Where shielded change goes, one of:\n"
+                "\"internal\": a new address of the source key's internal (change) key, unlinkable to fromaddress.\n"
+                "\"source\": fromaddress itself, encrypted with its outgoing viewing key. Its viewing key then shows\n"
+                "the change and the balance. Needs a shielded fromaddress."},
         },
         RPCResult{
             RPCResult::Type::STR_HEX, "txid", "The transaction id of the sent transaction"
@@ -344,6 +348,7 @@ RPCHelpMan z_sendmany()
             HelpExampleCli("z_sendmany", "\"KSvgmrG5YH1yXqRx99XzXphsvkQXpjdFxK\" "
                            "'[{\"address\":\"ks1...\",\"amount\":10.0}]'")
     + HelpExampleCli("z_sendmany", "\"ks1...\" '[{\"address\":\"ks1...\",\"amount\":10.0}]' 1 null \"sender\"")
+    + HelpExampleCli("z_sendmany", "\"ks1...\" '[{\"address\":\"ks1...\",\"amount\":10.0}]' 1 null \"sender\" \"source\"")
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
@@ -480,6 +485,14 @@ RPCHelpMan z_sendmany()
             }
             if (ovkMode == "sender" && !fromIsShielded) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "ovk \"sender\" needs a shielded fromaddress");
+            }
+
+            const std::string changeMode = request.params[5].isNull() ? "internal" : request.params[5].get_str();
+            if (changeMode != "internal" && changeMode != "source") {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid change value. Must be \"internal\" or \"source\".");
+            }
+            if (changeMode == "source" && !fromIsShielded) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "change \"source\" needs a shielded fromaddress");
             }
 
             const auto& chainparams = Params();
@@ -645,8 +658,28 @@ RPCHelpMan z_sendmany()
                 // Add change output back to an unlinkable internal address (ZIP 316).
                 // Using the same address as the sender would allow trivial change
                 // heuristic deanonymization.
+                //
+                // change "source" opts out, for an address whose viewing key is
+                // published: change goes back to fromaddress, so that key alone
+                // shows the change and the balance. The address is already the
+                // wallet's, so there is nothing to register after the commit.
                 CAmount change = noteTotal - totalSend - fee;
-                if (change > 0) {
+                if (change > 0 && changeMode == "source") {
+                    auto fvk = km.GetFvk(fromSapling);
+                    if (!fvk) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Full viewing key not found for source address");
+                    }
+                    std::array<uint8_t, 43> sourceAddr;
+                    std::copy(fromSapling.d.begin(), fromSapling.d.end(), sourceAddr.begin());
+                    std::copy(fromSapling.pk_d.begin(), fromSapling.pk_d.end(), sourceAddr.begin() + 11);
+                    std::array<uint8_t, 32> sourceOvk;
+                    std::copy(fvk->ovk.begin(), fvk->ovk.end(), sourceOvk.begin());
+
+                    if (!builder.AddSaplingOutput(sourceOvk, sourceAddr, change)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to add shielded change output");
+                    }
+                    nShieldedOutputs++;
+                } else if (change > 0) {
                     // Get FVK + DK from sender address
                     auto fvk = km.GetFvk(fromSapling);
                     auto dk = km.GetDk(fromSapling);
@@ -1619,7 +1652,8 @@ RPCHelpMan z_viewtransaction()
         "whether or not the notes have since been spent) and its outgoing viewing keys\n"
         "(payments sent by wallets that keep one). Kerrigan Core does not keep an outgoing\n"
         "viewing key on outputs it pays to others, so those outputs are not shown, unless\n"
-        "z_sendmany was called with ovk \"sender\".\n"
+        "z_sendmany was called with ovk \"sender\". Change sent with z_sendmany change \"source\"\n"
+        "is an output to the source address, not marked as change.\n"
         "Needs no spending key: works on a locked wallet and on a viewing-key-only wallet.\n"
         "A transaction outside the wallet and the mempool is found through -txindex (on by\n"
         "default), or through the block of a note it paid to this wallet.\n",

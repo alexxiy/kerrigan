@@ -138,6 +138,7 @@ class SaplingViewTransactionTest(BitcoinTestFramework):
         assert_equal(node1.z_viewtransaction(spend_txid)["outputs"][0]["change"], True)
 
         self.test_sender_ovk()
+        self.test_change_to_source()
 
     def test_sender_ovk(self):
         node0, node1, node2 = self.nodes
@@ -187,6 +188,49 @@ class SaplingViewTransactionTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "Invalid ovk value", node0.z_sendmany, self.z0, [{"address": self.payee, "amount": 1}], 1, FEE, "all")
         assert_raises_rpc_error(-8, "ovk \"sender\" needs a shielded fromaddress",
                                 node0.z_sendmany, self.t_addr, [{"address": self.payee, "amount": 1}], 1, FEE, "sender")
+
+    def test_change_to_source(self):
+        node0, node1, node2 = self.nodes
+        memo_hex = REFUND_MEMO.encode().hex()
+
+        def check_payout(txid, balance):
+            for node in (node0, node2):
+                view = node.z_viewtransaction(txid)
+                assert_equal([o["address"] for o in view["outputs"] if o["outgoing"]], [self.payee])
+                change = [o for o in view["outputs"] if not o["outgoing"]]
+                assert_equal(len(change), 1)
+                assert_equal(change[0]["address"], self.z0)
+                assert_equal(change[0]["change"], False)
+                assert_equal(change[0]["value"], balance)
+                assert "memoStr" not in change[0]
+                assert_equal(node.z_getbalance(self.z0), balance)
+
+        self.log.info("change \"source\": the change pays fromaddress, and the source's viewing key shows it and the balance")
+        txid = node0.z_sendmany(self.z0, [{"address": self.payee, "amount": 1, "memo": memo_hex}], 1, FEE, "sender", "source")
+        self.mine()
+        self.sync_all()
+        balance = Decimal("10") - 1 - Decimal("2.5") - 1 - 3 * FEE
+        check_payout(txid, balance)
+
+        self.log.info("change errors")
+        assert_raises_rpc_error(-8, "Invalid change value", node0.z_sendmany, self.z0, [{"address": self.payee, "amount": 1}], 1, FEE, "none", "self")
+        assert_raises_rpc_error(-8, "change \"source\" needs a shielded fromaddress",
+                                node0.z_sendmany, self.t_addr, [{"address": self.payee, "amount": 1}], 1, FEE, "none", "source")
+
+        self.log.info("After a restart, the next payout spends that change as an ordinary note of fromaddress")
+        self.restart_node(0)
+        self.connect_nodes(0, 1)
+        self.connect_nodes(0, 2)
+        assert_equal(node0.z_getbalance(self.z0), balance)
+        prev_txid = txid
+        txid = node0.z_sendmany(self.z0, [{"address": self.payee, "amount": 1, "memo": memo_hex}], 1, FEE, "sender", "source")
+        self.mine()
+        self.sync_all()
+        spends = node2.z_viewtransaction(txid)["spends"]
+        assert_equal(len(spends), 1)
+        assert_equal(spends[0]["txidPrev"], prev_txid)
+        assert_equal(spends[0]["address"], self.z0)
+        check_payout(txid, balance - 1 - FEE)
 
 
 if __name__ == '__main__':
